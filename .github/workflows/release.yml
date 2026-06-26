@@ -94,7 +94,10 @@ jobs:
       - name: Sign image (keyless)
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
-        run: cosign sign --yes "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${DIGEST}"
+        run: |
+          # cosign requires a fully lowercase reference; the org slug is mixed-case.
+          IMAGE="$(echo '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}' | tr '[:upper:]' '[:lower:]')"
+          cosign sign --yes "${IMAGE}@${DIGEST}"
 
   chart:
     name: Package Helm chart
@@ -152,7 +155,7 @@ jobs:
 
             **Container image**
             ```
-            ghcr.io/${{ github.repository_owner }}/launchpad:${{ needs.prepare.outputs.version }}
+            ghcr.io/basekick-labs/launchpad:${{ needs.prepare.outputs.version }}
             ```
 
             **Run with Docker Compose**
@@ -163,6 +166,6 @@ jobs:
 
             **Install with Helm**
             ```bash
-            helm install launchpad ./launchpad-${{ needs.prepare.outputs.version }}.tgz \
+            helm install launchpad oci://ghcr.io/basekick-labs/charts/launchpad --version ${{ needs.prepare.outputs.version }} \
               --set jwtSecret=$(openssl rand -hex 32)
             ```
