@@ -1,0 +1,39 @@
+# Arc Launchpad — self-hosted UI for Arc.
+#
+# Quick start:
+#   LAUNCHPAD_JWT_SECRET=$(openssl rand -hex 32) docker compose up -d
+#
+# Then open http://localhost:3000 — the first account you create becomes the
+# admin. Persisted state (accounts, teams, connection records) lives in the
+# named volume `launchpad-data`.
+
+services:
+  launchpad:
+    image: ghcr.io/basekick-labs/launchpad:latest
+    container_name: launchpad
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # REQUIRED — signs session tokens. Generate with: openssl rand -hex 32
+      - LAUNCHPAD_JWT_SECRET=${LAUNCHPAD_JWT_SECRET:?set LAUNCHPAD_JWT_SECRET, e.g. export LAUNCHPAD_JWT_SECRET=$(openssl rand -hex 32)}
+      # Public URL of this deployment (used for email links + passkey origin).
+      - LAUNCHPAD_BASE_URL=${LAUNCHPAD_BASE_URL:-http://localhost:3000}
+      - LAUNCHPAD_DB_PATH=/app/data/launchpad.db
+      # Optional integrations — uncomment and set to enable.
+      # - MAILGUN_API_KEY=
+      # - MAILGUN_DOMAIN=
+      # - EMAIL_FROM=Arc Launchpad <noreply@example.com>
+      # - PUBLIC_TURNSTILE_SITE_KEY=
+      # - TURNSTILE_SECRET_KEY=
+    volumes:
+      - launchpad-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  launchpad-data:

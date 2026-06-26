@@ -1,0 +1,165 @@
+/* Web Fonts - must be first */
+@import '@fontsource/inter/400.css';
+@import '@fontsource/inter/500.css';
+@import '@fontsource/inter/600.css';
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+
+/* Tailwind CSS */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Arc Design Tokens - ClickHouse-Inspired Neutral Palette */
+@layer base {
+  :root {
+    /* Arc Brand Colors - Keep for logo/special cases only */
+    --arc-purple: 275 100% 25%;
+    --arc-cyan: 180 100% 45%;
+    --arc-magenta: 300 100% 45%;
+    --arc-navy: 240 41% 17%;
+
+    /* Light Mode - Clean neutral palette (ClickHouse-inspired) */
+    --background: 0 0% 100%;           /* #FFFFFF - clean white */
+    --foreground: 0 0% 6%;             /* #0F0F0F - near black text */
+    --card: 0 0% 98%;                  /* #FAFAFA - subtle elevation */
+    --card-foreground: 0 0% 6%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 6%;
+    --primary: 270 91% 65%;            /* Arc Purple - THE accent color */
+    --primary-foreground: 0 0% 100%;   /* White text on purple */
+    --secondary: 0 0% 96%;             /* #F5F5F5 - neutral secondary */
+    --secondary-foreground: 0 0% 6%;
+    --muted: 0 0% 96%;                 /* #F5F5F5 */
+    --muted-foreground: 0 0% 40%;      /* #666666 */
+    --accent: 270 91% 65%;             /* Arc Purple for accent too */
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 90%;                /* #E5E5E5 - clean separation */
+    --input: 0 0% 90%;
+    --ring: 270 91% 65%;               /* Purple focus ring */
+    --radius: 0.5rem;
+
+    /* Legacy variables for backward compatibility */
+    --bg-primary: #ffffff;
+    --bg-secondary: #fafafa;
+    --bg-hover: #f5f5f5;
+    --text-primary: #0f0f0f;
+    --text-secondary: #666666;
+    --border-color: #e5e5e5;
+    --accent-color: #A855F7;
+    --accent-hover: #9333EA;
+
+    /* Typography */
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.5;
+    font-weight: 400;
+
+    color-scheme: light dark;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Dark Mode - True dark neutrals (ClickHouse-inspired) */
+  .dark {
+    --background: 0 0% 6%;             /* #0F0F0F - near black */
+    --foreground: 0 0% 98%;            /* #FAFAFA - bright text */
+    --card: 0 0% 10%;                  /* #1A1A1A - slightly elevated */
+    --card-foreground: 0 0% 98%;
+    --popover: 0 0% 10%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 270 91% 65%;            /* Arc Purple - THE accent */
+    --primary-foreground: 0 0% 100%;   /* White text on purple */
+    --secondary: 0 0% 14%;             /* #242424 - elevated surface */
+    --secondary-foreground: 0 0% 98%;
+    --muted: 0 0% 14%;                 /* #242424 */
+    --muted-foreground: 0 0% 63%;      /* #A1A1A1 */
+    --accent: 270 91% 65%;             /* Arc Purple */
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 62.8% 50.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 17%;                /* #2A2A2A - subtle borders */
+    --input: 0 0% 17%;
+    --ring: 270 91% 65%;               /* Purple focus ring */
+
+    /* Legacy variables */
+    --bg-primary: #0f0f0f;
+    --bg-secondary: #1a1a1a;
+    --bg-hover: #242424;
+    --text-primary: #fafafa;
+    --text-secondary: #a1a1a1;
+    --border-color: #2a2a2a;
+    --accent-color: #A855F7;
+    --accent-hover: #9333EA;
+  }
+
+  /* System preference fallback when no class is set */
+  @media (prefers-color-scheme: dark) {
+    :root:not(.light) {
+      --background: 0 0% 6%;
+      --foreground: 0 0% 98%;
+      --card: 0 0% 10%;
+      --card-foreground: 0 0% 98%;
+      --popover: 0 0% 10%;
+      --popover-foreground: 0 0% 98%;
+      --primary: 270 91% 65%;
+      --primary-foreground: 0 0% 100%;
+      --secondary: 0 0% 14%;
+      --secondary-foreground: 0 0% 98%;
+      --muted: 0 0% 14%;
+      --muted-foreground: 0 0% 63%;
+      --accent: 270 91% 65%;
+      --accent-foreground: 0 0% 100%;
+      --destructive: 0 62.8% 50.6%;
+      --destructive-foreground: 0 0% 98%;
+      --border: 0 0% 17%;
+      --input: 0 0% 17%;
+      --ring: 270 91% 65%;
+
+      --bg-primary: #0f0f0f;
+      --bg-secondary: #1a1a1a;
+      --bg-hover: #242424;
+      --text-primary: #fafafa;
+      --text-secondary: #a1a1a1;
+      --border-color: #2a2a2a;
+      --accent-color: #A855F7;
+      --accent-hover: #9333EA;
+    }
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    margin: 0;
+    padding: 0;
+    min-height: 100vh;
+  }
+
+  #app {
+    min-height: 100vh;
+  }
+}
+
+/* Utility classes for Arc brand colors */
+@layer utilities {
+  .text-arc-purple {
+    color: hsl(var(--arc-purple));
+  }
+  .text-arc-cyan {
+    color: hsl(var(--arc-cyan));
+  }
+  .text-arc-magenta {
+    color: hsl(var(--arc-magenta));
+  }
+  .bg-arc-navy {
+    background-color: hsl(var(--arc-navy));
+  }
+}

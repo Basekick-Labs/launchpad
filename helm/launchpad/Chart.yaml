@@ -1,0 +1,19 @@
+apiVersion: v2
+name: launchpad
+description: Self-hosted web UI for Arc, the high-performance columnar analytical database.
+type: application
+# version (chart) and appVersion are overridden at release time by the workflow.
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - arc
+  - analytics
+  - duckdb
+  - database
+  - ui
+home: https://github.com/basekick-labs/launchpad
+sources:
+  - https://github.com/basekick-labs/launchpad
+maintainers:
+  - name: Basekick Labs
+    email: contact@basekick.net

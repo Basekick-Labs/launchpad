@@ -1,0 +1,28 @@
+Arc Launchpad has been deployed.
+
+{{- if .Values.ingress.enabled }}
+
+URL(s):
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else if eq .Values.service.type "LoadBalancer" }}
+
+Get the external IP (may take a moment to provision):
+  kubectl get svc -w {{ include "launchpad.fullname" . }} --namespace {{ .Release.Namespace }}
+{{- else }}
+
+The service is ClusterIP (internal). Port-forward to reach it locally:
+  kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ include "launchpad.fullname" . }} 8080:{{ .Values.service.port }}
+  open http://localhost:8080
+{{- end }}
+
+First run:
+  The first account you create becomes the admin. After that, self-service
+  signup is closed — additional users join by admin invitation only.
+
+{{- if and (not .Values.existingSecret) (not .Values.jwtSecret) }}
+
+WARNING: no JWT secret was set. Re-run with:
+  --set jwtSecret=$(openssl rand -hex 32)
+{{- end }}

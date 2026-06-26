@@ -1,0 +1,111 @@
+# Default values for Arc Launchpad.
+
+image:
+  repository: ghcr.io/basekick-labs/launchpad
+  # Defaults to the chart's appVersion if left empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+replicaCount: 1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Required: the secret used to sign session tokens.
+# Provide ONE of:
+#   1. jwtSecret — a literal value (chart creates a Secret). Easiest:
+#        helm install ... --set jwtSecret=$(openssl rand -hex 32)
+#   2. existingSecret — name of a pre-created Secret holding the key below.
+# ─────────────────────────────────────────────────────────────────────────────
+jwtSecret: ""
+existingSecret: ""
+existingSecretKey: "LAUNCHPAD_JWT_SECRET"
+
+# Public URL of this deployment (email links + WebAuthn/passkey origin).
+baseUrl: "http://localhost:3000"
+
+# Extra environment variables (e.g. Mailgun, Turnstile, OAuth). See .env.example.
+# extraEnv:
+#   - name: MAILGUN_API_KEY
+#     value: "..."
+extraEnv: []
+
+# Pull additional env from existing ConfigMaps/Secrets.
+envFrom: []
+
+# Persistence for the SQLite database (accounts, teams, connection records).
+persistence:
+  enabled: true
+  size: 1Gi
+  accessMode: ReadWriteOnce
+  storageClass: ""
+  # Mount path inside the container; LAUNCHPAD_DB_PATH points here.
+  mountPath: /app/data
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 3000
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: launchpad.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: launchpad-tls
+  #    hosts:
+  #      - launchpad.example.com
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+livenessProbe:
+  httpGet:
+    path: /
+    port: http
+  initialDelaySeconds: 15
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Pod-level security context (the image runs as the non-root `node` user, uid 1000).
+podSecurityContext:
+  fsGroup: 1000
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}

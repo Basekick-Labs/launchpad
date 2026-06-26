@@ -1,0 +1,3 @@
+# Arc Launchpad is a private application — discourage all crawling.
+User-agent: *
+Disallow: /
