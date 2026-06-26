@@ -2,10 +2,11 @@
   import { Badge } from '$lib/components/ui/badge';
   import { Button } from '$lib/components/ui/button';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
-  import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+  import ActionMenu from '$lib/components/ActionMenu.svelte';
+  import ActionMenuItem from '$lib/components/ActionMenuItem.svelte';
   import * as Tooltip from '$lib/components/ui/tooltip';
   import { toast } from 'svelte-sonner';
-  import { MoreHorizontal, Mail, Shield, User, Crown, Eye, X, Info } from 'lucide-svelte';
+  import { Mail, Shield, User, Crown, Eye, X, Info } from 'lucide-svelte';
   import { onMount } from 'svelte';
   import { timezone, formatDateTime } from '$lib/stores/timezone';
 
@@ -268,41 +269,19 @@
               <div class="flex items-center gap-2">
                 <Badge variant={roleBadgeVariant(member.role)}>{member.role}</Badge>
                 {#if isOwner && member.role !== 'owner' && member.id !== data.user.id}
-                  <DropdownMenu.Root>
-                    <DropdownMenu.Trigger>
-                      <button class="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground">
-                        <MoreHorizontal class="h-4 w-4" />
-                      </button>
-                    </DropdownMenu.Trigger>
-                    <DropdownMenu.Content align="end">
-                      {#if member.role === 'viewer'}
-                        <DropdownMenu.Item on:click={() => changeRole(member, 'member')}>
-                          Make member
-                        </DropdownMenu.Item>
-                        <DropdownMenu.Item on:click={() => changeRole(member, 'admin')}>
-                          Make admin
-                        </DropdownMenu.Item>
-                      {:else if member.role === 'member'}
-                        <DropdownMenu.Item on:click={() => changeRole(member, 'viewer')}>
-                          Make viewer
-                        </DropdownMenu.Item>
-                        <DropdownMenu.Item on:click={() => changeRole(member, 'admin')}>
-                          Make admin
-                        </DropdownMenu.Item>
-                      {:else if member.role === 'admin'}
-                        <DropdownMenu.Item on:click={() => changeRole(member, 'viewer')}>
-                          Make viewer
-                        </DropdownMenu.Item>
-                        <DropdownMenu.Item on:click={() => changeRole(member, 'member')}>
-                          Make member
-                        </DropdownMenu.Item>
-                      {/if}
-                      <DropdownMenu.Separator />
-                      <DropdownMenu.Item class="text-destructive" on:click={() => confirmRemove(member)}>
-                        Remove from org
-                      </DropdownMenu.Item>
-                    </DropdownMenu.Content>
-                  </DropdownMenu.Root>
+                  <ActionMenu align="end">
+                    {#if member.role === 'viewer'}
+                      <ActionMenuItem on:click={() => changeRole(member, 'member')}>Make member</ActionMenuItem>
+                      <ActionMenuItem on:click={() => changeRole(member, 'admin')}>Make admin</ActionMenuItem>
+                    {:else if member.role === 'member'}
+                      <ActionMenuItem on:click={() => changeRole(member, 'viewer')}>Make viewer</ActionMenuItem>
+                      <ActionMenuItem on:click={() => changeRole(member, 'admin')}>Make admin</ActionMenuItem>
+                    {:else if member.role === 'admin'}
+                      <ActionMenuItem on:click={() => changeRole(member, 'viewer')}>Make viewer</ActionMenuItem>
+                      <ActionMenuItem on:click={() => changeRole(member, 'member')}>Make member</ActionMenuItem>
+                    {/if}
+                    <ActionMenuItem destructive on:click={() => confirmRemove(member)}>Remove from org</ActionMenuItem>
+                  </ActionMenu>
                 {:else if data.currentRole === 'admin' && (member.role === 'member' || member.role === 'viewer') && member.id !== data.user.id}
                   <button
                     on:click={() => confirmRemove(member)}

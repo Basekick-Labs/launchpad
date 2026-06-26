@@ -3,9 +3,10 @@
   import { Badge } from '$lib/components/ui/badge';
   import { Button } from '$lib/components/ui/button';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
-  import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+  import ActionMenu from '$lib/components/ActionMenu.svelte';
+  import ActionMenuItem from '$lib/components/ActionMenuItem.svelte';
   import { toast } from 'svelte-sonner';
-  import { MoreHorizontal, Mail, Copy, Check, ChevronRight, ChevronDown, Plus, Building2 } from 'lucide-svelte';
+  import { Mail, Copy, Check, ChevronRight, ChevronDown, Plus, Building2 } from 'lucide-svelte';
   import { timezone, formatDateTime } from '$lib/stores/timezone';
 
   export let data: any;
@@ -361,16 +362,10 @@
               </button>
               <div class="flex items-center gap-3">
                 <span class="hidden text-xs text-muted-foreground sm:inline">{org.owner_email ?? '—'}</span>
-                <DropdownMenu.Root>
-                  <DropdownMenu.Trigger asChild let:builder>
-                    <Button builders={[builder]} variant="ghost" size="sm"><MoreHorizontal class="h-4 w-4" /></Button>
-                  </DropdownMenu.Trigger>
-                  <DropdownMenu.Content align="end">
-                    <DropdownMenu.Item on:click={() => renameOrg(org)}>Rename</DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-                    <DropdownMenu.Item class="text-destructive" on:click={() => deleteOrg(org)}>Delete</DropdownMenu.Item>
-                  </DropdownMenu.Content>
-                </DropdownMenu.Root>
+                <ActionMenu align="end">
+                  <ActionMenuItem on:click={() => renameOrg(org)}>Rename</ActionMenuItem>
+                  <ActionMenuItem destructive on:click={() => deleteOrg(org)}>Delete</ActionMenuItem>
+                </ActionMenu>
               </div>
             </div>
 
@@ -435,22 +430,16 @@
                             <Badge variant={m.role === 'owner' ? 'default' : m.role === 'admin' ? 'secondary' : 'outline'}>{m.role}</Badge>
                           </td>
                           <td class="py-2 text-right">
-                            <DropdownMenu.Root>
-                              <DropdownMenu.Trigger asChild let:builder>
-                                <Button builders={[builder]} variant="ghost" size="sm"><MoreHorizontal class="h-4 w-4" /></Button>
-                              </DropdownMenu.Trigger>
-                              <DropdownMenu.Content align="end">
-                                {#each ['owner', 'admin', 'member', 'viewer'] as r}
-                                  <DropdownMenu.Item disabled={m.role === r} on:click={() => setMemberRole(org.id, m, r)}>
-                                    Make {r}
-                                  </DropdownMenu.Item>
-                                {/each}
-                                <DropdownMenu.Separator />
-                                <DropdownMenu.Item class="text-destructive" disabled={m.role === 'owner'} on:click={() => removeMember(org.id, m)}>
-                                  Remove
-                                </DropdownMenu.Item>
-                              </DropdownMenu.Content>
-                            </DropdownMenu.Root>
+                            <ActionMenu align="end">
+                              {#each ['owner', 'admin', 'member', 'viewer'] as r}
+                                <ActionMenuItem disabled={m.role === r} on:click={() => setMemberRole(org.id, m, r)}>
+                                  Make {r}
+                                </ActionMenuItem>
+                              {/each}
+                              <ActionMenuItem destructive disabled={m.role === 'owner'} on:click={() => removeMember(org.id, m)}>
+                                Remove
+                              </ActionMenuItem>
+                            </ActionMenu>
                           </td>
                         </tr>
                       {/each}
@@ -541,17 +530,11 @@
               <td class="px-4 py-3 text-sm text-muted-foreground">{formatDateTime(user.created_at, $timezone)}</td>
               <td class="px-4 py-3 text-right">
                 {#if user.id !== data.currentUserId}
-                  <DropdownMenu.Root>
-                    <DropdownMenu.Trigger asChild let:builder>
-                      <Button builders={[builder]} variant="ghost" size="sm"><MoreHorizontal class="h-4 w-4" /></Button>
-                    </DropdownMenu.Trigger>
-                    <DropdownMenu.Content align="end">
-                      <DropdownMenu.Item on:click={() => toggleSuperAdmin(user)}>{user.is_operator ? 'Revoke super-admin' : 'Make super-admin'}</DropdownMenu.Item>
-                      <DropdownMenu.Item on:click={() => toggleSuspend(user)}>{user.suspended_at ? 'Reactivate' : 'Suspend'}</DropdownMenu.Item>
-                      <DropdownMenu.Separator />
-                      <DropdownMenu.Item class="text-destructive" on:click={() => deleteUser(user)}>Delete</DropdownMenu.Item>
-                    </DropdownMenu.Content>
-                  </DropdownMenu.Root>
+                  <ActionMenu align="end">
+                    <ActionMenuItem on:click={() => toggleSuperAdmin(user)}>{user.is_operator ? 'Revoke super-admin' : 'Make super-admin'}</ActionMenuItem>
+                    <ActionMenuItem on:click={() => toggleSuspend(user)}>{user.suspended_at ? 'Reactivate' : 'Suspend'}</ActionMenuItem>
+                    <ActionMenuItem destructive on:click={() => deleteUser(user)}>Delete</ActionMenuItem>
+                  </ActionMenu>
                 {:else}
                   <span class="text-xs text-muted-foreground">You</span>
                 {/if}
