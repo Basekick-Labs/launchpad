@@ -10,7 +10,7 @@
 
 services:
   ps-launchpad:
-    image: ghcr.io/basekick-labs/launchpad:0.1.1
+    image: ghcr.io/basekick-labs/launchpad:0.1.2
     container_name: ps-launchpad
     restart: unless-stopped
     networks:
