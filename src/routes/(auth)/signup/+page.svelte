@@ -152,9 +152,8 @@
 </div>
 
 {#if !inviteOrg}
-  <!-- Self-service signup is disabled. Accounts are created by an administrator
-       invitation; invited users reach this page with an org context and see the
-       form below. Public visitors get this notice. -->
+  <!-- Self-service signup is invite-only. The first admin account is created via
+       the first-run setup wizard (/setup), not here. -->
   <div class="rounded-md border border-input bg-card p-6 text-center">
     <p class="text-sm text-muted-foreground">
       Registration is by invitation only. Please contact your administrator for access.

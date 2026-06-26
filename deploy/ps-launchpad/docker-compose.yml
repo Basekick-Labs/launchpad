@@ -1,0 +1,39 @@
+# Arc Launchpad for the vdconsultingpartners (PS) trial.
+#
+# Self-hosted UI at https://launchpad.ps.customers.basekick.net — connect the
+# prod (ps-arc) and dev (ps-arc-dev) Arc instances here, then invite the
+# customer. Place at /opt/services/ps-launchpad/docker-compose.yml.
+#
+# JWT secret lives in a .env file next to this compose (LAUNCHPAD_JWT_SECRET=...)
+# and must NOT be committed. Persisted state (accounts, teams, connection
+# records) lives in the named volume ps-launchpad-data.
+
+services:
+  ps-launchpad:
+    image: ghcr.io/basekick-labs/launchpad:0.1.0
+    container_name: ps-launchpad
+    restart: unless-stopped
+    networks:
+      - traefik
+    environment:
+      - LAUNCHPAD_JWT_SECRET=${LAUNCHPAD_JWT_SECRET:?set LAUNCHPAD_JWT_SECRET in .env}
+      - LAUNCHPAD_BASE_URL=https://launchpad.ps.customers.basekick.net
+      - LAUNCHPAD_DB_PATH=/app/data/launchpad.db
+    volumes:
+      - ps-launchpad-data:/app/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik"
+      - "traefik.http.routers.ps-launchpad.rule=Host(`launchpad.ps.customers.basekick.net`)"
+      - "traefik.http.routers.ps-launchpad.entrypoints=https"
+      - "traefik.http.routers.ps-launchpad.tls=true"
+      - "traefik.http.routers.ps-launchpad.tls.certresolver=letsencrypt"
+      - "traefik.http.services.ps-launchpad.loadbalancer.server.port=3000"
+
+networks:
+  traefik:
+    external: true
+
+volumes:
+  ps-launchpad-data:
+    driver: local

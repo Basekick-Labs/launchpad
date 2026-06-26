@@ -90,6 +90,14 @@ function runMigrations(db: Database.Database) {
       created_at TEXT DEFAULT (datetime('now'))
     );
 
+    -- Key/value application settings written by the setup wizard / admin
+    -- (e.g. email transport config). Values are JSON-encoded strings.
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS email_verification_tokens (
       token TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

@@ -85,22 +85,23 @@ export const handle: Handle = async ({ event, resolve }) => {
   }
 
   // First-run bootstrap: if the database has no users yet, funnel everyone to the
-  // signup page so the first admin account can be created. Allow the signup page,
-  // the signup/OAuth endpoints, and static assets through.
+  // setup wizard so the first admin account can be created. Allow the wizard page,
+  // its form actions, and static assets through.
   const path = event.url.pathname;
+  const db = getDb();
+  const hasUser = db.prepare('SELECT 1 FROM users WHERE deleted_at IS NULL LIMIT 1').get();
+
   const firstRunAllowed =
-    path === '/signup' ||
-    path.startsWith('/api/v1/auth/signup') ||
-    path.startsWith('/auth/') ||
+    path === '/setup' ||
     path.startsWith('/_app/') ||
     path.startsWith('/images/') ||
     path === '/favicon.ico';
-  if (!firstRunAllowed) {
-    const db = getDb();
-    const hasUser = db.prepare('SELECT 1 FROM users WHERE deleted_at IS NULL LIMIT 1').get();
-    if (!hasUser) {
-      return Response.redirect(new URL('/signup', event.url.origin).toString(), 302);
-    }
+  if (!hasUser && !firstRunAllowed) {
+    return Response.redirect(new URL('/setup', event.url.origin).toString(), 302);
+  }
+  // Once setup is complete, the wizard is gone — never serve it again.
+  if (hasUser && path === '/setup') {
+    return Response.redirect(new URL('/login', event.url.origin).toString(), 302);
   }
 
   const response = await resolve(event);

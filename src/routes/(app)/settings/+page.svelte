@@ -26,6 +26,60 @@
   let orgSuccess = false;
   let orgError = '';
 
+  // Email settings (admin only)
+  let emailCfg: any = { provider: 'none' };
+  let emailFrom = '';
+  let smtpHost = '', smtpPort = 587, smtpSecure = false, smtpUser = '', smtpPass = '';
+  let mgDomain = '', mgApiKey = '', mgApiUrl = '';
+  let emailLoading = false, emailSaved = false, emailError = '';
+  let emailTestTo = '', emailTesting = false, emailTestOk = false;
+
+  async function loadEmailConfig() {
+    if (!data.user.is_operator) return;
+    const res = await fetch('/api/v1/admin/email');
+    if (!res.ok) return;
+    const { email: e } = await res.json();
+    emailCfg = e;
+    emailFrom = e.from || '';
+    if (e.provider === 'smtp') {
+      smtpHost = e.host || ''; smtpPort = e.port || 587; smtpSecure = !!e.secure; smtpUser = e.user || '';
+    } else if (e.provider === 'mailgun') {
+      mgDomain = e.domain || ''; mgApiUrl = e.apiUrl || '';
+    }
+  }
+  loadEmailConfig();
+
+  function emailPayload() {
+    if (emailCfg.provider === 'smtp') {
+      return { provider: 'smtp', from: emailFrom, host: smtpHost, port: smtpPort, secure: smtpSecure, user: smtpUser, pass: smtpPass || undefined };
+    }
+    if (emailCfg.provider === 'mailgun') {
+      return { provider: 'mailgun', from: emailFrom, domain: mgDomain, apiKey: mgApiKey || undefined, apiUrl: mgApiUrl || undefined };
+    }
+    return { provider: 'none' };
+  }
+
+  async function saveEmail() {
+    emailLoading = true; emailError = ''; emailSaved = false;
+    try {
+      const res = await fetch('/api/v1/admin/email', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(emailPayload()) });
+      if (!res.ok) throw new Error((await res.json()).error || 'Save failed');
+      emailSaved = true; mgApiKey = ''; smtpPass = '';
+      setTimeout(() => (emailSaved = false), 2500);
+    } catch (err: any) { emailError = err.message; }
+    finally { emailLoading = false; }
+  }
+
+  async function testEmail() {
+    emailTesting = true; emailError = ''; emailTestOk = false;
+    try {
+      const res = await fetch('/api/v1/admin/email', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...emailPayload(), to: emailTestTo }) });
+      if (!res.ok) throw new Error((await res.json()).error || 'Test failed');
+      emailTestOk = true;
+    } catch (err: any) { emailError = err.message; }
+    finally { emailTesting = false; }
+  }
+
   // MFA state
   let mfaSetupData: { qrDataUri: string; secret: string; challengeId: string } | null = null;
   let mfaCode = '';
@@ -462,6 +516,107 @@
           {/if}
         </div>
       </form>
+    {/if}
+
+    {#if data.user.is_operator}
+      <!-- Email (admin only) -->
+      <div class="mt-6 rounded-lg border bg-card p-6">
+        <h2 class="mb-1 font-semibold">Email</h2>
+        <p class="mb-4 text-xs text-muted-foreground">
+          Used for invitations and notifications. With no provider, emails are logged to the server console.
+        </p>
+
+        {#if emailError}
+          <div class="mb-3 rounded-md bg-destructive/10 p-2 text-sm text-destructive">{emailError}</div>
+        {/if}
+
+        <div class="space-y-3">
+          <div>
+            <label for="email_provider" class="mb-1 block text-xs text-muted-foreground">Provider</label>
+            <select id="email_provider" bind:value={emailCfg.provider}
+              class="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm">
+              <option value="none">None</option>
+              <option value="smtp">SMTP</option>
+              <option value="mailgun">Mailgun</option>
+            </select>
+          </div>
+
+          {#if emailCfg.provider !== 'none'}
+            <div>
+              <label for="email_from" class="mb-1 block text-xs text-muted-foreground">From address</label>
+              <input id="email_from" bind:value={emailFrom} placeholder="Arc Launchpad <noreply@example.com>"
+                class="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm" />
+            </div>
+          {/if}
+
+          {#if emailCfg.provider === 'smtp'}
+            <div class="grid grid-cols-3 gap-2">
+              <div class="col-span-2">
+                <label for="smtp_host" class="mb-1 block text-xs text-muted-foreground">Host</label>
+                <input id="smtp_host" bind:value={smtpHost} class="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm" />
+              </div>
+              <div>
+                <label for="smtp_port" class="mb-1 block text-xs text-muted-foreground">Port</label>
+                <input id="smtp_port" type="number" bind:value={smtpPort} class="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm" />
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label for="smtp_user" class="mb-1 block text-xs text-muted-foreground">Username</label>
+                <input id="smtp_user" bind:value={smtpUser} class="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm" />
+              </div>
+              <div>
+                <label for="smtp_pass" class="mb-1 block text-xs text-muted-foreground">Password {#if emailCfg.passSet}<span class="text-muted-foreground">(set — leave blank to keep)</span>{/if}</label>
+                <input id="smtp_pass" type="password" bind:value={smtpPass} class="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm" />
+              </div>
+            </div>
+            <label class="flex items-center gap-2 text-sm">
+              <input type="checkbox" bind:checked={smtpSecure} class="h-4 w-4 rounded border-input accent-primary" />
+              <span class="text-muted-foreground">Use TLS (port 465)</span>
+            </label>
+          {/if}
+
+          {#if emailCfg.provider === 'mailgun'}
+            <div>
+              <label for="mg_domain" class="mb-1 block text-xs text-muted-foreground">Domain</label>
+              <input id="mg_domain" bind:value={mgDomain} class="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm" />
+            </div>
+            <div>
+              <label for="mg_api_key" class="mb-1 block text-xs text-muted-foreground">API key {#if emailCfg.apiKeySet}<span class="text-muted-foreground">(set — leave blank to keep)</span>{/if}</label>
+              <input id="mg_api_key" type="password" bind:value={mgApiKey} class="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm" />
+            </div>
+            <div>
+              <label for="mg_api_url" class="mb-1 block text-xs text-muted-foreground">API base URL</label>
+              <input id="mg_api_url" bind:value={mgApiUrl} placeholder="https://api.mailgun.net" class="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm" />
+            </div>
+          {/if}
+
+          <div class="flex items-center gap-2 pt-1">
+            <Button size="sm" on:click={saveEmail} disabled={emailLoading}>
+              {emailLoading ? 'Saving...' : 'Save'}
+            </Button>
+            {#if emailSaved}
+              <span class="flex items-center gap-1 text-xs text-green-500"><Check class="h-3 w-3" /> Saved</span>
+            {/if}
+          </div>
+
+          {#if emailCfg.provider !== 'none'}
+            <div class="flex items-end gap-2 border-t pt-3">
+              <div class="flex-1">
+                <label for="email_test_to" class="mb-1 block text-xs text-muted-foreground">Send a test to</label>
+                <input id="email_test_to" type="email" bind:value={emailTestTo} placeholder="you@example.com"
+                  class="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm" />
+              </div>
+              <Button size="sm" variant="outline" on:click={testEmail} disabled={emailTesting || !emailTestTo}>
+                {emailTesting ? 'Sending...' : 'Send test'}
+              </Button>
+            </div>
+            {#if emailTestOk}
+              <span class="flex items-center gap-1 text-xs text-green-500"><Check class="h-3 w-3" /> Test sent</span>
+            {/if}
+          {/if}
+        </div>
+      </div>
     {/if}
   </div>
 </div>

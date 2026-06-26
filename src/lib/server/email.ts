@@ -1,6 +1,8 @@
 import crypto from 'crypto';
+import nodemailer from 'nodemailer';
 import { env } from '$env/dynamic/private';
 import { getDb } from './db';
+import { getEmailConfig, type EmailConfig } from './settings';
 
 const TOKEN_EXPIRY_MINUTES = 60;
 
@@ -19,32 +21,62 @@ export function createVerificationToken(userId: string): string {
   return token;
 }
 
-async function sendEmail(to: string, subject: string, text: string, html: string): Promise<void> {
-  const apiKey = env.MAILGUN_API_KEY || '';
-  const domain = env.MAILGUN_DOMAIN || '';
-  const apiUrl = env.MAILGUN_API_URL || 'https://api.mailgun.net';
-  const from = env.EMAIL_FROM || `Arc Launchpad <noreply@${domain}>`;
-
-  if (!apiKey || !domain) {
+// Dispatch a single email via the configured transport. With provider 'none'
+// (the default on a fresh install) the message is logged to the console so
+// invite/verification links are still recoverable from the container logs.
+async function deliver(
+  cfg: EmailConfig,
+  to: string,
+  subject: string,
+  text: string,
+  html: string,
+): Promise<void> {
+  if (cfg.provider === 'none') {
     console.log(`\n[Arc Launchpad] Email to ${to}: ${subject}\n${text}\n`);
     return;
   }
 
-  const body = new URLSearchParams({ from, to, subject, text, html });
-
-  const res = await fetch(`${apiUrl}/v3/${domain}/messages`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Basic ${Buffer.from(`api:${apiKey}`).toString('base64')}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body,
-  });
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Mailgun error: ${res.status} ${err}`);
+  if (cfg.provider === 'mailgun') {
+    const apiUrl = cfg.apiUrl || 'https://api.mailgun.net';
+    const body = new URLSearchParams({ from: cfg.from, to, subject, text, html });
+    const res = await fetch(`${apiUrl}/v3/${cfg.domain}/messages`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${Buffer.from(`api:${cfg.apiKey}`).toString('base64')}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body,
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Mailgun error: ${res.status} ${err}`);
+    }
+    return;
   }
+
+  // SMTP
+  const transport = nodemailer.createTransport({
+    host: cfg.host,
+    port: cfg.port,
+    secure: cfg.secure,
+    auth: cfg.user ? { user: cfg.user, pass: cfg.pass || '' } : undefined,
+  });
+  await transport.sendMail({ from: cfg.from, to, subject, text, html });
+}
+
+async function sendEmail(to: string, subject: string, text: string, html: string): Promise<void> {
+  await deliver(getEmailConfig(), to, subject, text, html);
+}
+
+/**
+ * Send a test message using a candidate config (not necessarily the saved one),
+ * so the setup wizard / admin page can verify credentials before persisting.
+ */
+export async function sendTestEmail(cfg: EmailConfig, to: string): Promise<void> {
+  const subject = 'Arc Launchpad test email';
+  const text = 'This is a test email from Arc Launchpad. If you received it, email delivery is configured correctly.';
+  const html = `<p>This is a test email from <strong>Arc Launchpad</strong>.</p><p>If you received it, email delivery is configured correctly.</p>`;
+  await deliver(cfg, to, subject, text, html);
 }
 
 export async function sendWelcomeEmail(email: string): Promise<void> {
