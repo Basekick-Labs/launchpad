@@ -4,7 +4,6 @@ import type { PageServerLoad, Actions } from './$types';
 import { getDb } from '$lib/server/db';
 import { hashPassword, createToken, sessionCookieOptions } from '$lib/server/auth';
 import { hasAnyUser, setEmailConfig, type EmailConfig } from '$lib/server/settings';
-import { sendTestEmail } from '$lib/server/email';
 
 // First-run setup wizard. Available ONLY while no account exists; once the
 // admin is created it is permanently closed (redirects to /login).
@@ -48,23 +47,9 @@ function parseEmailConfig(form: FormData): EmailConfig {
 }
 
 export const actions: Actions = {
-  // Test the email config without creating the admin (used by the "Send test" button).
-  testEmail: async ({ request }) => {
-    if (hasAnyUser()) return fail(403, { error: 'Setup already completed.' });
-    const form = await request.formData();
-    const to = String(form.get('test_to') || '').trim();
-    if (!to) return fail(400, { emailError: 'Enter an address to send the test to.' });
-    const cfg = parseEmailConfig(form);
-    if (cfg.provider === 'none') return fail(400, { emailError: 'Choose a provider first.' });
-    try {
-      await sendTestEmail(cfg, to);
-      return { emailTested: true };
-    } catch (err: any) {
-      return fail(400, { emailError: `Test failed: ${err.message}` });
-    }
-  },
-
   // Create the first admin account (and persist email config if provided).
+  // (The "Send test" button uses the /setup/test-email endpoint instead, so it
+  // never submits this form and never wipes the entered data.)
   complete: async ({ request, cookies }) => {
     if (hasAnyUser()) throw redirect(302, '/login');
 

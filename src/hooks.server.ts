@@ -91,15 +91,18 @@ export const handle: Handle = async ({ event, resolve }) => {
   const db = getDb();
   const hasUser = db.prepare('SELECT 1 FROM users WHERE deleted_at IS NULL LIMIT 1').get();
 
+  const onSetup = path === '/setup' || path.startsWith('/setup/');
   const firstRunAllowed =
-    path === '/setup' ||
+    onSetup ||
     path.startsWith('/_app/') ||
     path.startsWith('/images/') ||
     path === '/favicon.ico';
   if (!hasUser && !firstRunAllowed) {
     return Response.redirect(new URL('/setup', event.url.origin).toString(), 302);
   }
-  // Once setup is complete, the wizard is gone — never serve it again.
+  // Once setup is complete, the wizard page is gone — redirect it to login.
+  // (Its sub-routes like /setup/test-email return their own 403, so only the
+  // page itself is redirected.)
   if (hasUser && path === '/setup') {
     return Response.redirect(new URL('/login', event.url.origin).toString(), 302);
   }
