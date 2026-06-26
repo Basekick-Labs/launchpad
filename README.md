@@ -54,15 +54,50 @@ The server listens on `$PORT` (default `3000`).
 
 ## Docker
 
+Use the published image (`latest`, or pin a version tag from the [releases](https://github.com/basekick-labs/launchpad/releases)):
+
 ```bash
-docker build -t arc-launchpad .
 docker run -p 3000:3000 \
   -e LAUNCHPAD_JWT_SECRET=$(openssl rand -hex 32) \
-  -v $(pwd)/data:/app/data \
-  arc-launchpad
+  -v launchpad-data:/app/data \
+  ghcr.io/basekick-labs/launchpad:latest
 ```
 
 The SQLite database is written to `/app/data/launchpad.db` — mount a volume there to persist it.
+
+## Docker Compose
+
+```bash
+curl -O https://raw.githubusercontent.com/basekick-labs/launchpad/main/docker-compose.yml
+LAUNCHPAD_JWT_SECRET=$(openssl rand -hex 32) docker compose up -d
+```
+
+The compose file uses `ghcr.io/basekick-labs/launchpad:latest` and a named volume for the data.
+
+## Helm
+
+```bash
+helm install launchpad oci://ghcr.io/basekick-labs/charts/launchpad \
+  --set jwtSecret=$(openssl rand -hex 32) \
+  --set baseUrl=https://launchpad.example.com
+```
+
+Or from a release chart archive:
+
+```bash
+# grab launchpad-<version>.tgz from the latest GitHub Release
+helm install launchpad ./launchpad-*.tgz --set jwtSecret=$(openssl rand -hex 32)
+```
+
+Common values (see [`helm/launchpad/values.yaml`](helm/launchpad/values.yaml) for the full list):
+
+| Value | Default | Purpose |
+|---|---|---|
+| `jwtSecret` | `""` | **Required** unless `existingSecret` is set. Signs session tokens. |
+| `existingSecret` | `""` | Name of a pre-created Secret holding `LAUNCHPAD_JWT_SECRET` instead. |
+| `baseUrl` | `http://localhost:3000` | Public URL (email links + passkey origin). |
+| `persistence.size` | `1Gi` | PVC size for the SQLite database. |
+| `ingress.enabled` | `false` | Enable to expose via an Ingress. |
 
 ## Connecting to an Arc instance
 

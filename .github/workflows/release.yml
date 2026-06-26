@@ -120,6 +120,14 @@ jobs:
           name: helm-chart
           path: dist/*.tgz
 
+      - name: Log in to GHCR (for OCI chart push)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push chart to GHCR (OCI)
+        run: |
+          helm push dist/launchpad-${{ needs.prepare.outputs.version }}.tgz \
+            oci://ghcr.io/${{ github.repository_owner }}/charts
+
   release:
     name: GitHub Release
     runs-on: ubuntu-latest
