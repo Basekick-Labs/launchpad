@@ -220,6 +220,13 @@ function runMigrations(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_alert_dedup_last_sent ON alert_dedup(last_sent_at);
   `);
 
+  // Rebuild the legacy cloud/billing `instances` table (with tier/region/
+  // cpu_limit/… NOT NULL columns) into the lean self-hosted schema. Needed
+  // because CREATE TABLE IF NOT EXISTS is a no-op on an existing table, so a DB
+  // created by the old cloud build keeps NOT NULL columns the current code
+  // never populates — every instance insert then fails on `instances.tier`.
+  migrateLegacyInstancesTable(db);
+
   // Additive column backfills for databases created before a column existed.
   // CREATE TABLE IF NOT EXISTS won't add columns to an existing table, so any
   // column the running code SELECTs must be ensured here too, or the query
@@ -233,4 +240,53 @@ function ensureColumn(db: Database.Database, table: string, column: string, decl
   if (!cols.some((c) => c.name === column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
   }
+}
+
+/**
+ * If `instances` still has the old cloud schema (detected via the `tier`
+ * column), rebuild it to the lean schema, preserving the rows' still-relevant
+ * columns and dropping the dead billing/k8s ones. Runs inside a transaction so
+ * a failure leaves the original table intact.
+ */
+function migrateLegacyInstancesTable(db: Database.Database): void {
+  const cols = db.prepare(`PRAGMA table_info(instances)`).all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === 'tier')) return; // already lean
+
+  // Other tables FK-reference instances(id). We preserve the same id values, so
+  // referential integrity is maintained — but SQLite still checks FKs on
+  // DROP/RENAME, so disable enforcement across the swap. foreign_keys can't be
+  // toggled inside a transaction, so the pragma sits outside it.
+  db.pragma('foreign_keys = OFF');
+  try {
+    const rebuild = db.transaction(() => {
+      db.exec(`
+        CREATE TABLE instances_new (
+          id TEXT PRIMARY KEY,
+          org_id TEXT NOT NULL REFERENCES organizations(id),
+          resource_id TEXT NOT NULL UNIQUE,
+          name TEXT,
+          endpoint_url TEXT,
+          status TEXT,
+          arc_version TEXT,
+          admin_token TEXT,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now')),
+          suspended_at TEXT,
+          deleted_at TEXT
+        );
+        INSERT INTO instances_new
+          (id, org_id, resource_id, name, endpoint_url, status, arc_version, admin_token, created_at, updated_at, suspended_at, deleted_at)
+        SELECT id, org_id, resource_id, name, endpoint_url, status, arc_version, admin_token, created_at, updated_at, suspended_at, deleted_at
+        FROM instances;
+        DROP TABLE instances;
+        ALTER TABLE instances_new RENAME TO instances;
+        CREATE INDEX IF NOT EXISTS idx_instances_org ON instances(org_id);
+        CREATE INDEX IF NOT EXISTS idx_instances_resource_id ON instances(resource_id);
+      `);
+    });
+    rebuild();
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
+  console.log('[db] migrated legacy instances table to lean schema');
 }
