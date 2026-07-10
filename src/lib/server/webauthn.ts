@@ -42,7 +42,9 @@ export async function generateRegistrationChallenge(
     })),
     authenticatorSelection: {
       residentKey: 'preferred',
-      userVerification: 'preferred',
+      // Require user verification (PIN/biometric) so a passkey is a genuine
+      // two-factor credential — presence alone is not enough to log in.
+      userVerification: 'required',
     },
   });
 
@@ -76,6 +78,7 @@ export async function verifyRegistration(challengeId: string, userId: string, re
     expectedChallenge,
     expectedOrigin: expectedOrigins,
     expectedRPID: rpID,
+    requireUserVerification: true,
   });
 
   if (!verification.verified || !verification.registrationInfo) {
@@ -90,7 +93,9 @@ export async function generateAuthenticationChallenge() {
 
   const options = await generateAuthenticationOptions({
     rpID,
-    userVerification: 'preferred',
+    // Require user verification: a stolen/plugged-in authenticator can't
+    // complete a login on presence alone (see verifyAuthentication).
+    userVerification: 'required',
   });
 
   const challengeId = uuidv4();
@@ -136,6 +141,7 @@ export async function verifyAuthentication(
     expectedChallenge,
     expectedOrigin: expectedOrigins,
     expectedRPID: rpID,
+    requireUserVerification: true,
     credential: {
       id: storedCredential.id,
       publicKey: new Uint8Array(storedCredential.public_key),

@@ -55,7 +55,7 @@
       const data = await res.json();
       if (!res.ok) {
         if (data.requiresVerification) {
-          goto(`/verify-email?email=${encodeURIComponent(data.email)}`);
+          goto(`/verify-email?email=${encodeURIComponent(email)}`);
           return;
         }
         throw new Error(data.error || 'Login failed');

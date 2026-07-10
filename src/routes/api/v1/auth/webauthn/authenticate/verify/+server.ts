@@ -50,7 +50,9 @@ export const POST: RequestHandler = async ({ request, cookies, getClientAddress 
     return json({ error: err.message || 'Authentication failed' }, { status: 401 });
   }
 
-  // Passkey login bypasses MFA — issue session directly
+  // A passkey login is itself a strong (user-verified) second factor — the
+  // challenge required user verification (PIN/biometric), so it satisfies MFA
+  // on its own and we issue a full session directly.
   const displayName = [user.first_name, user.last_name].filter(Boolean).join(' ');
   const token = createToken({
     userId: user.id,

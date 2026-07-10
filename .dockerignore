@@ -1,0 +1,26 @@
+# Secrets and local config — must never enter the build context / image layers
+.env
+.env.*
+!.env.example
+
+# Local data (SQLite databases, WAL, backups)
+data/
+
+# Version control and CI
+.git/
+.github/
+
+# Build artifacts and caches (rebuilt inside the image)
+node_modules/
+build/
+.svelte-kit/
+
+# Editor / OS cruft
+.vscode/
+.DS_Store
+**/.DS_Store
+
+# Docs and deploy manifests not needed at runtime
+deploy/
+helm/
+docs/

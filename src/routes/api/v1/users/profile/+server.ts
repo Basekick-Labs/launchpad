@@ -2,6 +2,7 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
 import { sendVerificationEmail } from '$lib/server/email';
+import { isValidEmail } from '$lib/server/util';
 
 export const PATCH: RequestHandler = async ({ locals, request }) => {
   if (!locals.user) {
@@ -12,11 +13,16 @@ export const PATCH: RequestHandler = async ({ locals, request }) => {
   const { first_name, last_name, email } = body;
 
   const db = getDb();
-  const emailChanged = email && email.trim().toLowerCase() !== locals.user.email.toLowerCase();
+  // Normalize to lowercase to match how emails are stored/looked up elsewhere.
+  const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+  const emailChanged = !!normalizedEmail && normalizedEmail !== locals.user.email.toLowerCase();
 
-  // Validate email uniqueness if changing
+  // Validate format + uniqueness if changing
   if (emailChanged) {
-    const existing = db.prepare('SELECT id FROM users WHERE email = ? AND id != ?').get(email.trim(), locals.user.id);
+    if (!isValidEmail(normalizedEmail)) {
+      return json({ error: 'Please enter a valid email address.' }, { status: 400 });
+    }
+    const existing = db.prepare('SELECT id FROM users WHERE email = ? AND id != ?').get(normalizedEmail, locals.user.id);
     if (existing) {
       return json({ error: 'Email already in use' }, { status: 409 });
     }
@@ -35,7 +41,7 @@ export const PATCH: RequestHandler = async ({ locals, request }) => {
   }
   if (emailChanged) {
     updates.push('email = ?');
-    params.push(email.trim());
+    params.push(normalizedEmail);
     // Reset verification — user must re-verify the new address
     updates.push('email_verified = 0');
   }
@@ -51,7 +57,7 @@ export const PATCH: RequestHandler = async ({ locals, request }) => {
 
   // Send verification email to the new address
   if (emailChanged) {
-    sendVerificationEmail(email.trim(), locals.user.id).catch(console.error);
+    sendVerificationEmail(normalizedEmail, locals.user.id).catch(console.error);
   }
 
   const user = db.prepare('SELECT id, email, first_name, last_name, email_verified FROM users WHERE id = ?').get(locals.user.id) as any;
