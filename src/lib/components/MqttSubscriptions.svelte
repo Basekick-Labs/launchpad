@@ -56,7 +56,7 @@
   let fName = '';
   let fBroker = '';
   let fClientId = '';
-  let fTopics = ''; // newline/comma separated in the textarea
+  let fTopics = ''; // one topic per line in the textarea
   let fQos = 1;
   let fDatabase = '';
   let fUsername = '';
@@ -113,10 +113,14 @@
   }
 
   function parseTopics(raw: string): string[] {
-    return raw
-      .split(/[\n,]/)
+    // One topic per line. (Not comma-split: a comma is a legal MQTT topic
+    // character, so splitting on it would corrupt such a topic.) De-dupe so a
+    // copy-paste duplicate doesn't double-subscribe.
+    const topics = raw
+      .split('\n')
       .map((t) => t.trim())
       .filter(Boolean);
+    return [...new Set(topics)];
   }
 
   function parseTopicMapping(raw: string): Record<string, string> | undefined {
@@ -124,7 +128,9 @@
     if (lines.length === 0) return undefined;
     const map: Record<string, string> = {};
     for (const line of lines) {
-      const idx = line.indexOf('=');
+      // Split on the LAST '=' — a database name can't contain '=', but a topic
+      // legally can, so the tail is unambiguously the database.
+      const idx = line.lastIndexOf('=');
       if (idx === -1) continue;
       const topic = line.slice(0, idx).trim();
       const db = line.slice(idx + 1).trim();
@@ -199,10 +205,13 @@
   // Number inputs are bound through the text-based Input wrapper, so their
   // values arrive as strings once edited. Coerce to a non-negative integer
   // (fallback to the default) before validating/sending — Arc's contract wants
-  // integers, and string comparisons like "9" > "60" are lexicographic.
+  // integers, and string comparisons like "9" > "60" are lexicographic. Use a
+  // strict digits-only parse: parseInt would silently accept "60abc"→60 or
+  // truncate "1e9"→1 / "1.5"→1, sending a value the user never intended.
   function toInt(value: number | string, fallback: number): number {
-    const n = typeof value === 'number' ? value : parseInt(value, 10);
-    return Number.isFinite(n) && n >= 0 ? n : fallback;
+    if (typeof value === 'number') return Number.isInteger(value) && value >= 0 ? value : fallback;
+    const s = value.trim();
+    return /^\d+$/.test(s) ? parseInt(s, 10) : fallback;
   }
 
   function validateForm(): string | null {
@@ -613,7 +622,7 @@
           placeholder={"sensors/#\nfactory/+/temperature"}
           bind:value={fTopics}
         ></textarea>
-        <p class="text-xs text-muted-foreground">One topic per line (or comma-separated). MQTT wildcards + and # are allowed.</p>
+        <p class="text-xs text-muted-foreground">One topic per line. MQTT wildcards + and # are allowed.</p>
       </div>
 
       <div class="grid grid-cols-2 gap-4">

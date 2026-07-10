@@ -25,15 +25,22 @@ const ALLOWED_RESPONSE_HEADERS = new Set([
 // Read-only Arc endpoints a plain org `member`/`viewer` may reach through the
 // proxy with a safe (GET/HEAD) method. This is a DEFAULT-CLOSED allowlist: any
 // path not matched here — every mutating verb, and every admin route (delete,
-// rbac, backup, mqtt, retention, tokens, …) — requires owner/admin. That way a
-// newly-added Arc admin route is locked down by default instead of being
+// rbac, backup, mqtt, retention, tokens, logs, …) — requires owner/admin. That
+// way a newly-added Arc admin route is locked down by default instead of being
 // viewer-reachable until someone remembers to blocklist it.
+//
+// IMPORTANT: each entry must correspond to a route Arc itself serves WITHOUT
+// `withAdminAuth`/`adminAuth`. Because the proxy injects the instance admin
+// token, Arc's own auth won't stop a member here — this list is the only gate.
+// Verified against Arc: GET databases (handleList, no admin), POST query +
+// GET measurements (readAuth), GET metrics* (no admin). `/api/v1/logs` is
+// deliberately EXCLUDED — Arc guards it with withAdminAuth (it leaks SQL,
+// internal IPs, and tokens), so it must remain owner/admin-only here too.
 const MEMBER_READ_PREFIXES = [
   'api/v1/query',        // SQL reads (Arc uses POST for query — see below)
-  'api/v1/databases',
+  'api/v1/databases',    // GET list only; POST create is adminAuth (blocked by method gate)
   'api/v1/measurements',
   'api/v1/metrics',
-  'api/v1/logs',
   'api/v1/health',
   'health',
 ];
@@ -151,14 +158,18 @@ async function proxyRequest(request: Request, params: { org_id: string; id: stri
     return json({ error: 'Forbidden' }, { status: 403 });
   }
 
+  // Canonicalize the path the same way Arc will (collapse //, resolve ./ and
+  // ../, lowercase). We both GATE on this and FORWARD it, so the byte string we
+  // authorize is exactly the one Arc routes on — a slash/dot spelling can never
+  // pass the gate as a read while Arc normalizes it back to an admin route.
+  const canonicalPath = canonicalizePath(params.path);
+
   // The proxy injects the instance's Arc admin token, so on the Arc side every
   // request is admin-privileged. Gate that on the control plane: owners/admins
   // may reach anything; plain members are limited to read-only query/read
-  // endpoints (default-closed). Canonicalize first so slash/dot tricks can't
-  // smuggle an admin path past the check that Arc would then normalize back.
+  // endpoints (default-closed).
   if (!['owner', 'admin'].includes(membership.role)) {
-    const canonical = canonicalizePath(params.path);
-    if (!isMemberAllowed(request.method, canonical)) {
+    if (!isMemberAllowed(request.method, canonicalPath)) {
       return json({ error: 'Forbidden' }, { status: 403 });
     }
   }
@@ -199,9 +210,10 @@ async function proxyRequest(request: Request, params: { org_id: string; id: stri
     headers['authorization'] = `Bearer ${instance.admin_token}`;
   }
 
-  // Preserve the original query string when forwarding to Arc.
+  // Forward the canonical path (the one we gated on) plus the original query
+  // string, so the authorized string and the routed string are identical.
   const search = new URL(request.url).search;
-  const targetPath = `${params.path}${search}`;
+  const targetPath = `${canonicalPath}${search}`;
 
   // Read the body as raw bytes so binary payloads (msgpack/parquet) aren't
   // corrupted by a UTF-8 round-trip.

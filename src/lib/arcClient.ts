@@ -896,7 +896,8 @@ export class ArcClient {
     if (!response.ok) {
       throw this.mqttError('Failed to fetch MQTT subscription', await response.text());
     }
-    const data = await response.json() as { subscription: MqttSubscription };
+    const data = await response.json() as { subscription?: MqttSubscription };
+    if (!data.subscription) throw new Error('Malformed MQTT response from Arc');
     return data.subscription;
   }
 
@@ -909,7 +910,8 @@ export class ArcClient {
     if (!response.ok) {
       throw this.mqttError('Failed to create MQTT subscription', await response.text());
     }
-    const data = await response.json() as { subscription: MqttSubscription };
+    const data = await response.json() as { subscription?: MqttSubscription };
+    if (!data.subscription) throw new Error('Malformed MQTT response from Arc');
     return data.subscription;
   }
 
@@ -922,7 +924,8 @@ export class ArcClient {
     if (!response.ok) {
       throw this.mqttError('Failed to update MQTT subscription', await response.text());
     }
-    const data = await response.json() as { subscription: MqttSubscription };
+    const data = await response.json() as { subscription?: MqttSubscription };
+    if (!data.subscription) throw new Error('Malformed MQTT response from Arc');
     return data.subscription;
   }
 
@@ -958,7 +961,8 @@ export class ArcClient {
     if (!response.ok) {
       throw this.mqttError('Failed to fetch MQTT stats', await response.text());
     }
-    const data = await response.json() as { stats: MqttSubscriptionStats };
+    const data = await response.json() as { stats?: MqttSubscriptionStats };
+    if (!data.stats) throw new Error('Malformed MQTT stats response from Arc');
     return data.stats;
   }
 }
