@@ -20,6 +20,11 @@ services:
       # Public URL of this deployment (used for email links + passkey origin).
       - LAUNCHPAD_BASE_URL=${LAUNCHPAD_BASE_URL:-http://localhost:3000}
       - LAUNCHPAD_DB_PATH=/app/data/launchpad.db
+      # Allow registering Arc instances on private/localhost addresses (e.g. an
+      # Arc container on the same Docker network, or a host-side Arc). Off by
+      # default as an SSRF safeguard. From inside this container, reach a
+      # host-side Arc via host.docker.internal, not localhost.
+      # - LAUNCHPAD_ALLOW_PRIVATE_ENDPOINTS=true
       # Optional integrations — uncomment and set to enable.
       # - MAILGUN_API_KEY=
       # - MAILGUN_DOMAIN=

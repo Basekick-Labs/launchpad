@@ -59,7 +59,8 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
     const { admin_token: _t, ...safeInstance } = updated!;
     return json({ instance: safeInstance });
   } catch (err: any) {
-    const message = /valid Arc server URL/i.test(err?.message || '')
+    const known = err?.name === 'PrivateEndpointBlockedError' || /valid Arc server URL/i.test(err?.message || '');
+    const message = known
       ? err.message
       : 'Could not update the instance. Check the endpoint URL and try again.';
     return json({ error: message }, { status: 400 });

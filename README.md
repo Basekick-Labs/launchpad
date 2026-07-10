@@ -41,7 +41,19 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 |---|---|
 | `LAUNCHPAD_JWT_SECRET` | Secret used to sign session tokens. **The app refuses to start in production without it.** Generate one with `openssl rand -hex 32`. |
 
-Email (Mailgun), signup CAPTCHA (Cloudflare Turnstile), ops alerting (Google Chat), and GitHub/Google OAuth are all **optional** — without them, those features are simply skipped (e.g. emails print to the console instead of being sent).
+Email (Mailgun), signup CAPTCHA (Cloudflare Turnstile), ops alerting (Google Chat), and Google OAuth are all **optional** — without them, those features are simply skipped (e.g. emails print to the console instead of being sent).
+
+### Connecting to an Arc instance on a private network
+
+By default, Launchpad **rejects Arc endpoints that resolve to a private, loopback, or link-local address** (`localhost`, `127.0.0.1`, `10.x`, `192.168.x`, `*.internal`, cloud metadata, …). This is an SSRF safeguard: the built-in proxy forwards requests to whatever endpoint you register, so untrusted endpoints must not be able to reach internal services.
+
+If your Arc server legitimately runs on a private network reachable from the Launchpad host — e.g. on the same box (`http://localhost:8000`), the same Docker network, or the same Kubernetes cluster — set:
+
+| Variable | Purpose |
+|---|---|
+| `LAUNCHPAD_ALLOW_PRIVATE_ENDPOINTS` | Set to `true` to allow registering Arc instances on private/localhost addresses. Default `false` (blocked). Even when enabled, the proxy still resolves-and-pins the target IP per request (DNS-rebinding safe). |
+
+Without it, registering (or health-checking) a private Arc endpoint fails with a "private/localhost endpoint blocked" error.
 
 ## Production build
 
@@ -64,6 +76,8 @@ docker run -p 3000:3000 \
 ```
 
 The SQLite database is written to `/app/data/launchpad.db` — mount a volume there to persist it.
+
+> If your Arc instance is on a private network reachable from the container (same host/Docker network), add `-e LAUNCHPAD_ALLOW_PRIVATE_ENDPOINTS=true` (see [Configuration](#configuration)). Note that `localhost` inside the container is the container itself — reach a host-side Arc via `host.docker.internal` or the host's LAN IP.
 
 ## Docker Compose
 

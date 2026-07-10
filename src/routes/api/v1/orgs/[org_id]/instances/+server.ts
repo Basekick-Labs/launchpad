@@ -55,9 +55,10 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
     const { admin_token, ...safeInstance } = instance;
     return json({ instance: safeInstance }, { status: 201 });
   } catch (err: any) {
-    // createInstance throws known validation messages; surface those but not
-    // any unexpected internal detail.
-    const message = /valid Arc server URL/i.test(err?.message || '')
+    // createInstance throws known validation messages; surface those (incl. the
+    // actionable private-endpoint hint) but not any unexpected internal detail.
+    const known = err?.name === 'PrivateEndpointBlockedError' || /valid Arc server URL/i.test(err?.message || '');
+    const message = known
       ? err.message
       : 'Could not connect the instance. Check the endpoint URL and try again.';
     return json({ error: message }, { status: 400 });

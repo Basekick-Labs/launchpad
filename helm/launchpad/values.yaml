@@ -26,6 +26,13 @@ existingSecretKey: "LAUNCHPAD_JWT_SECRET"
 # Public URL of this deployment (email links + WebAuthn/passkey origin).
 baseUrl: "http://localhost:3000"
 
+# Allow registering Arc instances on private/localhost/link-local addresses.
+# In-cluster Arc (a ClusterIP Service, a pod IP, *.svc.cluster.local) is a
+# private address, so set this to true when Launchpad connects to an Arc running
+# in the same cluster. Off by default as an SSRF safeguard; even when enabled,
+# the proxy resolves-and-pins the target IP per request (DNS-rebinding safe).
+allowPrivateEndpoints: false
+
 # Extra environment variables (e.g. Mailgun, Turnstile, OAuth). See .env.example.
 # extraEnv:
 #   - name: MAILGUN_API_KEY
