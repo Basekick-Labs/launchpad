@@ -15,29 +15,44 @@ export function allowPrivateEndpoints(): boolean {
   return env.LAUNCHPAD_ALLOW_PRIVATE_ENDPOINTS === 'true';
 }
 
+/** Error thrown when an endpoint is well-formed but blocked for being private. */
+export class PrivateEndpointBlockedError extends Error {
+  constructor() {
+    super(
+      'This looks like a private, localhost, or link-local address, which is blocked by default. ' +
+        'If your Arc server is on a private network reachable from the Launchpad host, set ' +
+        'LAUNCHPAD_ALLOW_PRIVATE_ENDPOINTS=true on the Launchpad server to allow it.',
+    );
+    this.name = 'PrivateEndpointBlockedError';
+  }
+}
+
 /**
  * Normalize a user-supplied Arc URL: trim, add scheme if missing, strip
- * trailing slash. Returns null when the URL is malformed, uses a non-http(s)
- * scheme, or — unless LAUNCHPAD_ALLOW_PRIVATE_ENDPOINTS=true — points at a
- * private/link-local/metadata address (SSRF guard).
+ * trailing slash. Returns null when the URL is malformed or uses a non-http(s)
+ * scheme. Throws {@link PrivateEndpointBlockedError} when the URL is otherwise
+ * valid but points at a private/link-local/metadata address and
+ * LAUNCHPAD_ALLOW_PRIVATE_ENDPOINTS is not enabled — so callers can surface a
+ * specific, actionable message instead of a generic "invalid URL".
  */
 export function normalizeEndpointUrl(raw: string): string | null {
   const trimmed = (raw || '').trim();
   if (!trimmed) return null;
   const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  let u: URL;
   try {
-    const u = new URL(withScheme);
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
-    // Block private/metadata targets unless operators opted in. isSafeUrl also
-    // rejects localhost/.internal/.local and private IP literals.
-    if (!allowPrivateEndpoints() && !isSafeUrl(withScheme, { allowHttp: true })) {
-      return null;
-    }
-    // Drop any path/query/hash — we proxy paths ourselves.
-    return `${u.protocol}//${u.host}`;
+    u = new URL(withScheme);
   } catch {
     return null;
   }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+  // Block private/metadata targets unless operators opted in. isSafeUrl also
+  // rejects localhost/.internal/.local and private IP literals.
+  if (!allowPrivateEndpoints() && !isSafeUrl(withScheme, { allowHttp: true })) {
+    throw new PrivateEndpointBlockedError();
+  }
+  // Drop any path/query/hash — we proxy paths ourselves.
+  return `${u.protocol}//${u.host}`;
 }
 
 /** Public-facing URL of an instance — simply its endpoint_url. */
@@ -72,9 +87,11 @@ export function queryArc(endpointUrl: string, adminToken: string, sql: string): 
  * healthy, otherwise 'unreachable'. Best-effort, never throws.
  */
 export async function checkArcHealth(endpointUrl: string | null | undefined, adminToken?: string | null): Promise<'running' | 'unreachable'> {
-  const base = normalizeEndpointUrl(endpointUrl || '');
-  if (!base) return 'unreachable';
   try {
+    // normalizeEndpointUrl throws for private endpoints when the opt-in is off;
+    // for a best-effort health probe that just means "unreachable".
+    const base = normalizeEndpointUrl(endpointUrl || '');
+    if (!base) return 'unreachable';
     const headers: Record<string, string> = {};
     if (adminToken) headers['authorization'] = `Bearer ${adminToken}`;
     // Route through the DNS-pinned SSRF guard so the admin token is never sent

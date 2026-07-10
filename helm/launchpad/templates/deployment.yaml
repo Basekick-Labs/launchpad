@@ -49,6 +49,10 @@ spec:
                 secretKeyRef:
                   name: {{ include "launchpad.secretName" . }}
                   key: {{ .Values.existingSecretKey }}
+            {{- if .Values.allowPrivateEndpoints }}
+            - name: LAUNCHPAD_ALLOW_PRIVATE_ENDPOINTS
+              value: "true"
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
