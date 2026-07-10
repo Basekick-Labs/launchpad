@@ -83,9 +83,34 @@ function isMemberAllowed(method: string, canonicalPath: string): boolean {
   return false;
 }
 
+// Try each validated IP the host resolved to, falling back on connection-level
+// errors. A dual-stack host may resolve to ::1 and 127.0.0.1 while the upstream
+// listens on only one family; every IP already passed the SSRF safety check, so
+// trying the next is safe. An HTTP response (any status) ends the loop — that's
+// a real answer, not a connection failure.
+async function proxyWithFallback(
+  method: string,
+  resolved: ResolvedTarget,
+  hostHeader: string,
+  path: string,
+  headers: Record<string, string>,
+  body: Buffer | null,
+): Promise<{ status: number; headers: Record<string, string>; body: Buffer }> {
+  let lastErr: unknown;
+  for (const ip of resolved.ips) {
+    try {
+      return await proxyViaNode(method, resolved, ip, hostHeader, path, headers, body);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr ?? new Error('Proxy error');
+}
+
 function proxyViaNode(
   method: string,
   resolved: ResolvedTarget,
+  ip: string,
   hostHeader: string,
   path: string,
   headers: Record<string, string>,
@@ -95,10 +120,10 @@ function proxyViaNode(
     const isHttps = resolved.protocol === 'https:';
     const mod = isHttps ? https : http;
 
-    // Dial the pinned IP we already validated; keep the original hostname for
-    // the Host header and TLS SNI. This closes the DNS-rebinding window.
+    // Dial a validated pinned IP; keep the original hostname for the Host header
+    // and TLS SNI. This closes the DNS-rebinding window.
     const options = {
-      host: resolved.ip,
+      host: ip,
       servername: isHttps ? resolved.hostname : undefined,
       port: resolved.port,
       path: `/${path}`,
@@ -223,7 +248,7 @@ async function proxyRequest(request: Request, params: { org_id: string; id: stri
 
   const hostHeader = new URL(instance.endpoint_url).host;
   try {
-    const result = await proxyViaNode(request.method, resolved, hostHeader, targetPath, headers, body);
+    const result = await proxyWithFallback(request.method, resolved, hostHeader, targetPath, headers, body);
 
     // Force nosniff so a spoofed/omitted Content-Type can't be sniffed into
     // active content executing on the Launchpad origin.

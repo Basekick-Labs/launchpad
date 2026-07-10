@@ -152,20 +152,26 @@ export function isSafeWebhookUrl(rawUrl: string): boolean {
 }
 
 export interface ResolvedTarget {
-  /** The pinned IP to actually connect to (defeats DNS rebinding). */
+  /** The pinned IP to connect to (defeats DNS rebinding). First of {@link ips}. */
   ip: string;
+  /**
+   * All validated safe IPs the host resolved to, in resolution order. Every one
+   * passed the private-range check, so a caller may try them in turn (e.g. a
+   * dual-stack host that returns ::1 first but only listens on 127.0.0.1).
+   */
+  ips: string[];
   /** Original hostname — use for the Host header / TLS SNI. */
   hostname: string;
   port: number;
   protocol: 'http:' | 'https:';
 }
 
-// Short-TTL cache of validated hostname→IP resolutions. Keeps the hot proxy
+// Short-TTL cache of validated hostname→IPs resolutions. Keeps the hot proxy
 // path from doing a DNS lookup per request while keeping the DNS-rebinding
 // window small: an attacker must re-point DNS AND wait out this TTL. Keyed on
 // hostname+allowPrivate because validation differs by that flag.
 const RESOLUTION_TTL_MS = 30_000;
-const resolutionCache = new Map<string, { ip: string; expiresAt: number }>();
+const resolutionCache = new Map<string, { ips: string[]; expiresAt: number }>();
 
 /**
  * Resolve a URL's hostname and validate EVERY resolved address against the
@@ -202,19 +208,21 @@ export async function assertSafeResolvedUrl(
     if (!opts.allowPrivate && isPrivateIp(hostname)) {
       throw new Error('Target resolves to a private address');
     }
-    return { ip: hostname, hostname, port, protocol };
+    return { ip: hostname, ips: [hostname], hostname, port, protocol };
   }
 
   const cacheKey = `${opts.allowPrivate ? '1' : '0'}:${hostname}`;
   const cached = resolutionCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
-    return { ip: cached.ip, hostname, port, protocol };
+    return { ip: cached.ips[0], ips: cached.ips, hostname, port, protocol };
   }
 
   // Resolve ALL addresses; reject if any is private (defensive against
-  // multi-record rebinding tricks) and pin to the first safe one. Even when
-  // private targets are allowed, we still resolve-and-pin so the address we
-  // connect to is the one we validated (no second, attacker-controlled lookup).
+  // multi-record rebinding tricks) and keep every safe one. Even when private
+  // targets are allowed, we still resolve-and-pin so the addresses we connect
+  // to are the ones we validated (no second, attacker-controlled lookup). We
+  // keep all of them so the caller can fall back across families — e.g. a
+  // dual-stack host that resolves ::1 first but only listens on 127.0.0.1.
   const records = await dns.lookup(hostname, { all: true });
   if (records.length === 0) throw new Error('Target host did not resolve');
   if (!opts.allowPrivate) {
@@ -224,7 +232,7 @@ export async function assertSafeResolvedUrl(
       }
     }
   }
-  const ip = records[0].address;
+  const ips = records.map((r) => r.address);
   // Bound the cache: drop expired entries once it grows past a small cap
   // (endpoints are operator-configured, so N is normally tiny).
   if (resolutionCache.size > 256) {
@@ -233,8 +241,8 @@ export async function assertSafeResolvedUrl(
       if (v.expiresAt <= now) resolutionCache.delete(k);
     }
   }
-  resolutionCache.set(cacheKey, { ip, expiresAt: Date.now() + RESOLUTION_TTL_MS });
-  return { ip, hostname, port, protocol };
+  resolutionCache.set(cacheKey, { ips, expiresAt: Date.now() + RESOLUTION_TTL_MS });
+  return { ip: ips[0], ips, hostname, port, protocol };
 }
 
 export interface SafeRequestOptions extends SafeUrlOptions {
@@ -272,37 +280,53 @@ export async function safeRequest(
   const timeoutMs = opts.timeoutMs ?? 15_000;
   const method = opts.method ?? 'GET';
 
-  return new Promise<SafeResponse>((resolve, reject) => {
-    const req = mod.request(
-      {
-        host: target.ip, // dial the pinned IP, not the (re-resolvable) hostname
-        servername: target.protocol === 'https:' ? target.hostname : undefined, // TLS SNI
-        port: target.port,
-        path: opts.path ?? (url.pathname + url.search),
-        method,
-        headers: { Host: url.host, ...(opts.headers ?? {}) }, // preserve vhost routing
-      },
-      (res) => {
-        const chunks: Buffer[] = [];
-        let total = 0;
-        res.on('data', (chunk: Buffer) => {
-          total += chunk.length;
-          if (opts.maxResponseBytes && total > opts.maxResponseBytes) {
-            req.destroy(new Error('Response too large'));
-            return;
-          }
-          chunks.push(chunk);
-        });
-        res.on('end', () =>
-          resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) }),
-        );
-      },
-    );
-    req.setTimeout(timeoutMs, () => req.destroy(new Error('Request timed out')));
-    req.on('error', reject);
-    if (opts.body != null && method !== 'GET' && method !== 'HEAD') req.write(opts.body);
-    req.end();
-  });
+  const attempt = (ip: string): Promise<SafeResponse> =>
+    new Promise<SafeResponse>((resolve, reject) => {
+      const req = mod.request(
+        {
+          host: ip, // dial a validated pinned IP, not the (re-resolvable) hostname
+          servername: target.protocol === 'https:' ? target.hostname : undefined, // TLS SNI
+          port: target.port,
+          path: opts.path ?? (url.pathname + url.search),
+          method,
+          headers: { Host: url.host, ...(opts.headers ?? {}) }, // preserve vhost routing
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          let total = 0;
+          res.on('data', (chunk: Buffer) => {
+            total += chunk.length;
+            if (opts.maxResponseBytes && total > opts.maxResponseBytes) {
+              req.destroy(new Error('Response too large'));
+              return;
+            }
+            chunks.push(chunk);
+          });
+          res.on('end', () =>
+            resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) }),
+          );
+        },
+      );
+      req.setTimeout(timeoutMs, () => req.destroy(new Error('Request timed out')));
+      req.on('error', reject);
+      if (opts.body != null && method !== 'GET' && method !== 'HEAD') req.write(opts.body);
+      req.end();
+    });
+
+  // Try each validated IP in turn, falling back on connection-level failures.
+  // A host can resolve to multiple families (e.g. ::1 and 127.0.0.1) while the
+  // upstream listens on only one; every IP here already passed the safety check,
+  // so trying the next is safe. Once we get an HTTP response (any status), we
+  // return it — an HTTP error is a real answer, not a connection failure.
+  let lastErr: unknown;
+  for (const ip of target.ips) {
+    try {
+      return await attempt(ip);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr ?? new Error('Request failed');
 }
 
 export interface SafePostResult {
