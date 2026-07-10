@@ -1,7 +1,7 @@
 import type { Statement } from 'better-sqlite3';
 import { env } from '$env/dynamic/private';
 import { getDb } from './db';
-import { isSafeWebhookUrl } from './util.js';
+import { isSafeWebhookUrl } from './ssrf.js';
 
 const DEDUP_WINDOW_MS = 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 5_000;

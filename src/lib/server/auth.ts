@@ -10,6 +10,12 @@ if (!JWT_SECRET) {
 }
 const JWT_EXPIRY = '7d';
 const SALT_ROUNDS = 12;
+const JWT_ALGORITHM = 'HS256' as const;
+const JWT_ISSUER = 'arc-launchpad';
+// Session tokens carry this audience; short-lived MFA half-tokens use a
+// different one (see mfa.ts) so the two can never be interchanged even though
+// they share a signing secret.
+export const JWT_AUDIENCE_SESSION = 'arc-launchpad:session';
 
 export interface JwtPayload {
   userId: string;
@@ -17,6 +23,11 @@ export interface JwtPayload {
   name: string; // display name (first + last) for backwards compat with existing tokens
   tv?: number; // token_version for revocation
 }
+
+// A valid bcrypt hash (cost 12) of a random string. Compared against on the
+// user-not-found / OAuth-only login paths so bcrypt runs regardless, keeping
+// login response timing uniform (anti-enumeration). It matches no real password.
+export const DUMMY_BCRYPT_HASH = '$2a$12$qEyLTxY1OMKvvjkKAstXduCO0tMRY9b8bG7FSclv4a49CpsPbJIO6';
 
 export async function hashPassword(password: string): Promise<string> {
   return bcrypt.hash(password, SALT_ROUNDS);
@@ -27,12 +38,23 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
 }
 
 export function createToken(payload: JwtPayload, tokenVersion: number = 0): string {
-  return jwt.sign({ ...payload, tv: tokenVersion }, JWT_SECRET, { expiresIn: JWT_EXPIRY });
+  return jwt.sign({ ...payload, tv: tokenVersion }, JWT_SECRET, {
+    expiresIn: JWT_EXPIRY,
+    algorithm: JWT_ALGORITHM,
+    issuer: JWT_ISSUER,
+    audience: JWT_AUDIENCE_SESSION,
+  });
 }
 
 export function verifyToken(token: string): JwtPayload | null {
   try {
-    return jwt.verify(token, JWT_SECRET) as JwtPayload;
+    // Pin the algorithm (no alg-confusion), issuer, and audience so an MFA
+    // half-token can never be accepted as a full session.
+    return jwt.verify(token, JWT_SECRET, {
+      algorithms: [JWT_ALGORITHM],
+      issuer: JWT_ISSUER,
+      audience: JWT_AUDIENCE_SESSION,
+    }) as JwtPayload;
   } catch {
     return null;
   }

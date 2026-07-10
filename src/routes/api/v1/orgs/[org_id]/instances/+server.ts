@@ -18,9 +18,8 @@ export const GET: RequestHandler = async ({ locals, params }) => {
     return json({ error: 'Forbidden' }, { status: 403 });
   }
 
-  const instances = listInstances(params.org_id).map(
-    ({ admin_token, ...safe }) => safe
-  );
+  // listInstances already excludes admin_token.
+  const instances = listInstances(params.org_id);
   return json({ instances });
 };
 
@@ -56,6 +55,11 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
     const { admin_token, ...safeInstance } = instance;
     return json({ instance: safeInstance }, { status: 201 });
   } catch (err: any) {
-    return json({ error: err.message }, { status: 400 });
+    // createInstance throws known validation messages; surface those but not
+    // any unexpected internal detail.
+    const message = /valid Arc server URL/i.test(err?.message || '')
+      ? err.message
+      : 'Could not connect the instance. Check the endpoint URL and try again.';
+    return json({ error: message }, { status: 400 });
   }
 };

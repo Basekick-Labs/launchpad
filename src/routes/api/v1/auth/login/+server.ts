@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
-import { verifyPassword, createToken, sessionCookieOptions } from '$lib/server/auth';
+import { verifyPassword, createToken, sessionCookieOptions, DUMMY_BCRYPT_HASH } from '$lib/server/auth';
 import { createMfaToken } from '$lib/server/mfa';
 import { isRateLimited } from '$lib/server/ratelimit';
 
@@ -27,21 +27,19 @@ export const POST: RequestHandler = async ({ request, cookies, getClientAddress 
   const db = getDb();
   const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email) as any;
 
-  if (!user) {
-    return json({ error: 'Invalid email or password' }, { status: 401 });
-  }
+  // Uniform invalid-credential response for all "can't authenticate with a
+  // password" cases (unknown user, OAuth-only account, wrong password) so the
+  // endpoint doesn't reveal which emails are registered or how they sign in.
+  const INVALID = json({ error: 'Invalid email or password' }, { status: 401 });
 
-  if (!user.password_hash) {
-    return json({ error: 'This account uses GitHub login. Please sign in with GitHub.' }, { status: 400 });
-  }
+  // Always run a bcrypt comparison — against the real hash if present, else a
+  // fixed dummy hash — so response timing doesn't distinguish "no such user"
+  // or "OAuth-only" from "wrong password".
+  const hashToCompare = user?.password_hash || DUMMY_BCRYPT_HASH;
+  const passwordMatches = await verifyPassword(password, hashToCompare);
 
-  const valid = await verifyPassword(password, user.password_hash);
-  if (!valid) {
-    return json({ error: 'Invalid email or password' }, { status: 401 });
-  }
-
-  if (user.deleted_at) {
-    return json({ error: 'Invalid email or password' }, { status: 401 });
+  if (!user || !user.password_hash || !passwordMatches || user.deleted_at) {
+    return INVALID;
   }
 
   if (user.suspended_at) {
@@ -49,7 +47,7 @@ export const POST: RequestHandler = async ({ request, cookies, getClientAddress 
   }
 
   if (!user.email_verified) {
-    return json({ error: 'Please verify your email before signing in.', requiresVerification: true, email: user.email }, { status: 403 });
+    return json({ error: 'Please verify your email before signing in.', requiresVerification: true }, { status: 403 });
   }
 
   // Check for pending invite cookie

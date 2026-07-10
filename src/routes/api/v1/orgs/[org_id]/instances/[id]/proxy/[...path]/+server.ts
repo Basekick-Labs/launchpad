@@ -5,27 +5,44 @@ import http from 'node:http';
 import { dev } from '$app/environment';
 import { getDb } from '$lib/server/db';
 import { getInstance } from '$lib/server/instance';
-import { getProxyTarget } from '$lib/server/arcConnection';
+import { allowPrivateEndpoints } from '$lib/server/arcConnection';
+import { assertSafeResolvedUrl, type ResolvedTarget } from '$lib/server/ssrf';
+
+// Only these response headers from the upstream Arc server are forwarded back
+// to the browser. Everything else is dropped so a malicious/compromised
+// upstream can't set cookies, redirect, relax CORS/CSP, or (via a spoofed
+// Content-Type) turn a proxied response into script executing on our origin.
+const ALLOWED_RESPONSE_HEADERS = new Set([
+  'content-type',
+  'content-length',
+  'content-encoding',
+  'cache-control',
+  'etag',
+  'last-modified',
+  'date',
+]);
 
 function proxyViaNode(
   method: string,
-  target: { hostname: string; port: number; protocol: string; host: string },
+  resolved: ResolvedTarget,
+  hostHeader: string,
   path: string,
   headers: Record<string, string>,
-  body: string | null,
-): Promise<{ status: number; headers: Record<string, string>; body: string }> {
+  body: Buffer | null,
+): Promise<{ status: number; headers: Record<string, string>; body: Buffer }> {
   return new Promise((resolve, reject) => {
-    const isHttps = target.protocol === 'https';
+    const isHttps = resolved.protocol === 'https:';
     const mod = isHttps ? https : http;
 
-    const reqHeaders: Record<string, string> = { ...headers, Host: target.host };
-
+    // Dial the pinned IP we already validated; keep the original hostname for
+    // the Host header and TLS SNI. This closes the DNS-rebinding window.
     const options = {
-      hostname: target.hostname,
-      port: target.port,
+      host: resolved.ip,
+      servername: isHttps ? resolved.hostname : undefined,
+      port: resolved.port,
       path: `/${path}`,
       method,
-      headers: reqHeaders,
+      headers: { ...headers, Host: hostHeader },
       ...(isHttps && dev ? { rejectUnauthorized: false } : {}),
     };
 
@@ -35,14 +52,14 @@ function proxyViaNode(
       res.on('end', () => {
         const respHeaders: Record<string, string> = {};
         for (const [key, value] of Object.entries(res.headers)) {
-          if (value && !['transfer-encoding', 'connection'].includes(key)) {
+          if (value && ALLOWED_RESPONSE_HEADERS.has(key.toLowerCase())) {
             respHeaders[key] = Array.isArray(value) ? value.join(', ') : value;
           }
         }
         resolve({
           status: res.statusCode || 502,
           headers: respHeaders,
-          body: Buffer.concat(chunks).toString('utf-8'),
+          body: Buffer.concat(chunks),
         });
       });
     });
@@ -85,22 +102,34 @@ async function proxyRequest(request: Request, params: { org_id: string; id: stri
     return json({ error: 'Instance not found' }, { status: 404 });
   }
 
-  const target = getProxyTarget(instance.endpoint_url);
-  if (!target) {
+  if (!instance.endpoint_url) {
     return json({ error: 'Instance has no Arc endpoint configured' }, { status: 503 });
   }
 
-  // Build headers
-  const headers: Record<string, string> = {};
-  for (const [key, value] of request.headers.entries()) {
-    if (['host', 'connection', 'keep-alive', 'transfer-encoding'].includes(key.toLowerCase())) continue;
-    headers[key] = value;
+  // Resolve + pin the target IP right before connecting. Honors the private-
+  // endpoint opt-in, but always validates so we connect to the address we
+  // checked (no second, attacker-controllable DNS lookup).
+  let resolved: ResolvedTarget;
+  try {
+    resolved = await assertSafeResolvedUrl(instance.endpoint_url, {
+      allowHttp: true,
+      allowPrivate: allowPrivateEndpoints(),
+    });
+  } catch {
+    return json({ error: 'Instance endpoint is not reachable or not allowed' }, { status: 502 });
   }
 
-  // Inject the instance's configured token when the caller didn't supply one.
-  // Any member who can see this instance proxies with the connection's credential.
-  const existingAuth = headers['authorization']?.replace(/^Bearer\s*/i, '').trim();
-  if (!existingAuth && instance.admin_token) {
+  // Build request headers. Strip hop-by-hop headers, client-supplied
+  // Authorization/Cookie (the stored admin token is the only credential we
+  // forward, only to the instance's own stored host), and content-length
+  // (Node recomputes it from the actual body we write).
+  const headers: Record<string, string> = {};
+  for (const [key, value] of request.headers.entries()) {
+    const k = key.toLowerCase();
+    if (['host', 'connection', 'keep-alive', 'transfer-encoding', 'authorization', 'cookie', 'content-length'].includes(k)) continue;
+    headers[key] = value;
+  }
+  if (instance.admin_token) {
     headers['authorization'] = `Bearer ${instance.admin_token}`;
   }
 
@@ -108,16 +137,23 @@ async function proxyRequest(request: Request, params: { org_id: string; id: stri
   const search = new URL(request.url).search;
   const targetPath = `${params.path}${search}`;
 
+  // Read the body as raw bytes so binary payloads (msgpack/parquet) aren't
+  // corrupted by a UTF-8 round-trip.
   const body = request.method !== 'GET' && request.method !== 'HEAD'
-    ? await request.text()
+    ? Buffer.from(await request.arrayBuffer())
     : null;
 
+  const hostHeader = new URL(instance.endpoint_url).host;
   try {
-    const result = await proxyViaNode(request.method, target, targetPath, headers, body);
+    const result = await proxyViaNode(request.method, resolved, hostHeader, targetPath, headers, body);
 
-    return new Response(result.body, {
+    // Force nosniff so a spoofed/omitted Content-Type can't be sniffed into
+    // active content executing on the Launchpad origin.
+    const respHeaders = { ...result.headers, 'X-Content-Type-Options': 'nosniff' };
+
+    return new Response(new Uint8Array(result.body), {
       status: result.status,
-      headers: result.headers,
+      headers: respHeaders,
     });
   } catch (err: any) {
     console.error('Proxy error:', err.message);

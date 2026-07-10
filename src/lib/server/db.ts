@@ -16,6 +16,16 @@ export function getDb(): Database.Database {
     db = new Database(DB_PATH);
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
+    // The DB stores secrets at rest (Arc admin tokens, SMTP/webhook config).
+    // Restrict the file (and WAL/SHM siblings) to the owner only. Best-effort:
+    // on platforms/filesystems without POSIX perms this silently no-ops.
+    for (const suffix of ['', '-wal', '-shm']) {
+      try {
+        if (fs.existsSync(DB_PATH + suffix)) fs.chmodSync(DB_PATH + suffix, 0o600);
+      } catch {
+        /* non-POSIX filesystem — ignore */
+      }
+    }
     runMigrations(db);
   }
   return db;
@@ -35,18 +45,17 @@ function runMigrations(db: Database.Database) {
       first_name TEXT,
       last_name TEXT,
       email_verified INTEGER DEFAULT 0,
-      github_id TEXT,
       google_id TEXT,
       token_version INTEGER DEFAULT 0,
       is_operator INTEGER DEFAULT 0,
       mfa_secret TEXT,
       mfa_enabled_at TEXT,
+      mfa_last_timestep INTEGER,
       suspended_at TEXT,
       deleted_at TEXT,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now'))
     );
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_github_id ON users(github_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id);
 
     CREATE TABLE IF NOT EXISTS organizations (
@@ -210,4 +219,18 @@ function runMigrations(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_alert_executions_rule_id ON alert_executions(alert_rule_id);
     CREATE INDEX IF NOT EXISTS idx_alert_dedup_last_sent ON alert_dedup(last_sent_at);
   `);
+
+  // Additive column backfills for databases created before a column existed.
+  // CREATE TABLE IF NOT EXISTS won't add columns to an existing table, so any
+  // column the running code SELECTs must be ensured here too, or the query
+  // throws "no such column" on older installs.
+  ensureColumn(db, 'users', 'mfa_last_timestep', 'INTEGER');
+}
+
+/** Idempotently add a column if the table doesn't already have it. */
+function ensureColumn(db: Database.Database, table: string, column: string, decl: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+  }
 }

@@ -1,9 +1,7 @@
 import { getDb } from './db.js';
-import { getProxyTarget } from './arcConnection.js';
+import { queryArc } from './arcConnection.js';
 import { parseIntervalToMs } from '../alertManager.js';
-import http from 'http';
-import https from 'https';
-import { isSafeWebhookUrl } from './util.js';
+import { isSafeWebhookUrl, safePostJson } from './ssrf.js';
 export { isSafeWebhookUrl };
 
 export const MIN_ALERT_INTERVAL_MS = 60_000; // 1 minute minimum
@@ -45,50 +43,20 @@ async function queryInstance(
   adminToken: string,
   sql: string,
 ): Promise<{ rows: unknown[][] } | null> {
-  const target = getProxyTarget(endpointUrl);
-  if (!target) return null;
-  const body = JSON.stringify({ sql });
-  const options = {
-    hostname: target.hostname,
-    port: target.port,
-    path: '/api/v1/query',
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(body),
-      'Authorization': `Bearer ${adminToken}`,
-      'Host': target.host,
-    },
-  };
-
-  return new Promise((resolve) => {
-    const timeout = setTimeout(() => resolve(null), 15_000);
-    const mod = target.protocol === 'https' ? https : http;
-    const MAX_RESPONSE_BYTES = 1024 * 1024; // 1 MB
-    const req = mod.request(options, (res) => {
-      let data = '';
-      res.on('data', (chunk) => {
-        data += chunk;
-        if (data.length > MAX_RESPONSE_BYTES) {
-          clearTimeout(timeout);
-          req.destroy();
-          resolve(null);
-        }
-      });
-      res.on('end', () => {
-        clearTimeout(timeout);
-        try {
-          const parsed = JSON.parse(data);
-          resolve(parsed);
-        } catch {
-          resolve(null);
-        }
-      });
-    });
-    req.on('error', () => { clearTimeout(timeout); resolve(null); });
-    req.write(body);
-    req.end();
-  });
+  if (!endpointUrl) return null;
+  try {
+    // safeRequest resolves + pins the IP so this admin-token request can't be
+    // redirected to an internal host via DNS rebinding.
+    const res = await queryArc(endpointUrl, adminToken, sql);
+    if (res.status < 200 || res.status >= 300) return null;
+    try {
+      return JSON.parse(res.body.toString('utf-8')) as { rows: unknown[][] };
+    } catch {
+      return null;
+    }
+  } catch {
+    return null;
+  }
 }
 
 async function fireWebhook(
@@ -113,17 +81,8 @@ async function fireWebhook(
   }
 
   try {
-    const url = new URL(webhookUrl);
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(resolve, 10_000);
-      const req = https.request(
-        { hostname: url.hostname, port: url.port || 443, path: url.pathname + url.search, method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } },
-        (res) => { res.resume(); res.on('end', () => { clearTimeout(timeout); resolve(); }); },
-      );
-      req.on('error', () => { clearTimeout(timeout); resolve(); });
-      req.write(payload);
-      req.end();
-    });
+    // safePostJson resolves + pins the IP, closing the DNS-rebinding window.
+    await safePostJson(webhookUrl, payload, { timeoutMs: 10_000 });
   } catch {
     // Webhook errors are non-fatal
   }

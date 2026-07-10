@@ -2,7 +2,7 @@ import { redirect } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
 import { createToken, sessionCookieOptions } from '$lib/server/auth';
-import { sendWelcomeEmail } from '$lib/server/email';
+import { sendWelcomeEmail, hashToken } from '$lib/server/email';
 
 export const GET: RequestHandler = async ({ url, cookies }) => {
   const token = url.searchParams.get('token');
@@ -12,14 +12,15 @@ export const GET: RequestHandler = async ({ url, cookies }) => {
   }
 
   const db = getDb();
-  const row = db.prepare('SELECT * FROM email_verification_tokens WHERE token = ?').get(token) as any;
+  const tokenHash = hashToken(token);
+  const row = db.prepare('SELECT * FROM email_verification_tokens WHERE token = ?').get(tokenHash) as any;
 
   if (!row) {
     throw redirect(302, '/login?error=invalid_token');
   }
 
   if (new Date(row.expires_at) < new Date()) {
-    db.prepare('DELETE FROM email_verification_tokens WHERE token = ?').run(token);
+    db.prepare('DELETE FROM email_verification_tokens WHERE token = ?').run(tokenHash);
     throw redirect(302, '/login?error=token_expired');
   }
 

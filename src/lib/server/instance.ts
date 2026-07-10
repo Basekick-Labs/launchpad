@@ -94,11 +94,22 @@ export function getInstanceByResourceId(resourceId: string): Instance | null {
   return db.prepare('SELECT * FROM instances WHERE resource_id = ? AND deleted_at IS NULL').get(resourceId) as Instance | null;
 }
 
-export function listInstances(orgId: string): Instance[] {
+/** Instance shape without the secret admin_token — safe to send to clients. */
+export type SafeInstance = Omit<Instance, 'admin_token'>;
+
+/**
+ * List an org's instances WITHOUT admin_token. This feeds page loads and API
+ * responses that get serialized to the browser, so it must never carry the
+ * Arc admin credential. Paths that genuinely need the token (proxy, alert
+ * evaluation) read it via getInstance / direct SQL instead.
+ */
+export function listInstances(orgId: string): SafeInstance[] {
   const db = getDb();
   return db.prepare(
-    'SELECT * FROM instances WHERE org_id = ? AND deleted_at IS NULL ORDER BY created_at DESC'
-  ).all(orgId) as Instance[];
+    `SELECT id, org_id, resource_id, name, endpoint_url, status, arc_version,
+            created_at, updated_at, suspended_at, deleted_at
+     FROM instances WHERE org_id = ? AND deleted_at IS NULL ORDER BY created_at DESC`
+  ).all(orgId) as SafeInstance[];
 }
 
 export function updateInstanceStatus(id: string, status: string): void {

@@ -20,7 +20,7 @@ export const POST: RequestHandler = async ({ request }) => {
   const db = getDb();
   const user = db.prepare('SELECT id, password_hash FROM users WHERE email = ?').get(email) as any;
 
-  // Only send if user exists and has a password (not GitHub-only)
+  // Only send if user exists and has a password (not OAuth-only)
   if (user && user.password_hash) {
     await sendPasswordResetEmail(email, user.id);
   }

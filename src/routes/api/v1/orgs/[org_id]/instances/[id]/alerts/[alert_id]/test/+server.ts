@@ -1,9 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
-import { getProxyTarget } from '$lib/server/arcConnection';
-import http from 'http';
-import https from 'https';
+import { queryArc } from '$lib/server/arcConnection';
 
 type AlertCondition = 'greater_than' | 'less_than' | 'equals' | 'not_equals' | 'contains';
 
@@ -25,8 +23,12 @@ export const POST: RequestHandler = async ({ locals, params }) => {
   const db = getDb();
   const membership = db.prepare(
     'SELECT role FROM org_members WHERE org_id = ? AND user_id = ?'
-  ).get(params.org_id, locals.user.id);
-  if (!membership) return json({ error: 'Forbidden' }, { status: 403 });
+  ).get(params.org_id, locals.user.id) as { role: string } | undefined;
+  // Running the alert query against Arc is a write-shaped side effect — restrict
+  // to owner/admin, matching alert create/update/delete. Viewers are read-only.
+  if (!membership || !['owner', 'admin'].includes(membership.role)) {
+    return json({ error: 'Forbidden' }, { status: 403 });
+  }
 
   const instance = db.prepare(
     'SELECT id, endpoint_url, admin_token FROM instances WHERE id = ? AND org_id = ? AND deleted_at IS NULL'
@@ -42,43 +44,20 @@ export const POST: RequestHandler = async ({ locals, params }) => {
     return json({ error: 'Instance admin token not available' }, { status: 503 });
   }
 
-  const target = getProxyTarget(instance.endpoint_url);
-  if (!target) {
+  if (!instance.endpoint_url) {
     return json({ error: 'Instance has no Arc endpoint configured' }, { status: 503 });
   }
-  const body = JSON.stringify({ sql: rule.query });
 
-  const result = await new Promise<{ rows?: unknown[][] } | null>((resolve) => {
-    const timeout = setTimeout(() => resolve(null), 15_000);
-    const options = {
-      hostname: target.hostname,
-      port: target.port,
-      path: '/api/v1/query',
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(body),
-        'Authorization': `Bearer ${instance.admin_token}`,
-        'Host': target.host,
-      },
-    };
-    const MAX_RESPONSE_BYTES = 1024 * 1024; // 1 MB
-    const mod = target.protocol === 'https' ? https : http;
-    const req = mod.request(options, (res) => {
-      let data = '';
-      res.on('data', (chunk) => {
-        data += chunk;
-        if (data.length > MAX_RESPONSE_BYTES) { req.destroy(); clearTimeout(timeout); resolve(null); }
-      });
-      res.on('end', () => {
-        clearTimeout(timeout);
-        try { resolve(JSON.parse(data)); } catch { resolve(null); }
-      });
-    });
-    req.on('error', () => { clearTimeout(timeout); resolve(null); });
-    req.write(body);
-    req.end();
-  });
+  // queryArc resolves + pins the IP (SSRF/rebinding-safe) and caps the response.
+  let result: { rows?: unknown[][] } | null = null;
+  try {
+    const res = await queryArc(instance.endpoint_url, instance.admin_token, rule.query);
+    if (res.status >= 200 && res.status < 300) {
+      try { result = JSON.parse(res.body.toString('utf-8')); } catch { result = null; }
+    }
+  } catch {
+    return json({ error: 'Instance endpoint is not reachable or not allowed' }, { status: 502 });
+  }
 
   if (!result?.rows?.length) {
     return json({ value: null, wouldTrigger: false, error: 'Query returned no results' });

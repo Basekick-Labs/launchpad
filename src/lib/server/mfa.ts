@@ -30,7 +30,13 @@ export async function generateTotpSecret(email: string): Promise<{ secret: strin
   return { secret: secret.base32, uri, qrDataUri };
 }
 
-export function verifyTotpCode(secret: string, code: string): boolean {
+/**
+ * Validate a TOTP code. Returns the absolute timestep (counter) the code
+ * matched, or null if invalid. Callers persist the last accepted timestep and
+ * reject any code whose timestep is <= it, so a code can't be replayed within
+ * its ±window validity period.
+ */
+export function verifyTotpCode(secret: string, code: string): { timestep: number } | null {
   const totp = new TOTP({
     issuer: ISSUER,
     algorithm: 'SHA1',
@@ -40,7 +46,10 @@ export function verifyTotpCode(secret: string, code: string): boolean {
   });
 
   const delta = totp.validate({ token: code, window: TOTP_WINDOW });
-  return delta !== null;
+  if (delta === null) return null;
+  // otpauth returns delta relative to "now"; convert to an absolute counter.
+  const now = Math.floor(Date.now() / 1000 / TOTP_PERIOD);
+  return { timestep: now + delta };
 }
 
 export async function generateRecoveryCodes(): Promise<{ plain: string[]; hashed: string[] }> {
@@ -74,13 +83,28 @@ export async function verifyRecoveryCode(
   return { valid: false, matchedId: null };
 }
 
+const JWT_ALGORITHM = 'HS256' as const;
+const JWT_ISSUER = 'arc-launchpad';
+// Distinct audience from full session tokens so a "passed password, not yet
+// MFA" half-token can never be replayed as a session, despite the shared secret.
+const MFA_AUDIENCE = 'arc-launchpad:mfa';
+
 export function createMfaToken(userId: string): string {
-  return jwt.sign({ userId, purpose: 'mfa' }, JWT_SECRET, { expiresIn: MFA_TOKEN_EXPIRY });
+  return jwt.sign({ userId, purpose: 'mfa' }, JWT_SECRET, {
+    expiresIn: MFA_TOKEN_EXPIRY,
+    algorithm: JWT_ALGORITHM,
+    issuer: JWT_ISSUER,
+    audience: MFA_AUDIENCE,
+  });
 }
 
 export function verifyMfaToken(token: string): { userId: string } | null {
   try {
-    const payload = jwt.verify(token, JWT_SECRET) as { userId: string; purpose: string };
+    const payload = jwt.verify(token, JWT_SECRET, {
+      algorithms: [JWT_ALGORITHM],
+      issuer: JWT_ISSUER,
+      audience: MFA_AUDIENCE,
+    }) as { userId: string; purpose: string };
     if (payload.purpose !== 'mfa') return null;
     return { userId: payload.userId };
   } catch {

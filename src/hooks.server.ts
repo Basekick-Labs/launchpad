@@ -109,7 +109,8 @@ export const handle: Handle = async ({ event, resolve }) => {
 
   const response = await resolve(event);
 
-  // Security headers
+  // Security headers. CSP is configured in svelte.config.js (kit.csp) so
+  // SvelteKit can hash its own inline hydration scripts.
   response.headers.set('X-Frame-Options', 'DENY');
   response.headers.set('X-Content-Type-Options', 'nosniff');
   response.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');

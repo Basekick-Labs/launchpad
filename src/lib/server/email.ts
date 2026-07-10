@@ -10,13 +10,23 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+/**
+ * Tokens are emailed in the clear but stored hashed, so a leaked DB/backup
+ * (or a read-only injection elsewhere) can't be replayed to take over an
+ * account. Lookups hash the incoming token and compare. SHA-256 is fine here:
+ * the token itself is 256 bits of CSPRNG entropy, so it isn't brute-forceable.
+ */
+export function hashToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
 export function createVerificationToken(userId: string): string {
   const token = crypto.randomBytes(32).toString('hex');
   const expiresAt = new Date(Date.now() + TOKEN_EXPIRY_MINUTES * 60 * 1000).toISOString();
 
   const db = getDb();
   db.prepare('DELETE FROM email_verification_tokens WHERE user_id = ?').run(userId);
-  db.prepare('INSERT INTO email_verification_tokens (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, userId, expiresAt);
+  db.prepare('INSERT INTO email_verification_tokens (token, user_id, expires_at) VALUES (?, ?, ?)').run(hashToken(token), userId, expiresAt);
 
   return token;
 }
@@ -37,9 +47,17 @@ async function deliver(
   }
 
   if (cfg.provider === 'mailgun') {
-    const apiUrl = cfg.apiUrl || 'https://api.mailgun.net';
+    const apiUrl = (cfg.apiUrl || 'https://api.mailgun.net').replace(/\/+$/, '');
+    // apiUrl must be an https URL; domain must be a bare hostname (no slashes /
+    // path segments) so it can't rewrite the request path.
+    if (!/^https:\/\//i.test(apiUrl)) {
+      throw new Error('Mailgun API URL must be https');
+    }
+    if (!cfg.domain || !/^[a-z0-9.-]+$/i.test(cfg.domain)) {
+      throw new Error('Invalid Mailgun domain');
+    }
     const body = new URLSearchParams({ from: cfg.from, to, subject, text, html });
-    const res = await fetch(`${apiUrl}/v3/${cfg.domain}/messages`, {
+    const res = await fetch(`${apiUrl}/v3/${encodeURIComponent(cfg.domain)}/messages`, {
       method: 'POST',
       headers: {
         Authorization: `Basic ${Buffer.from(`api:${cfg.apiKey}`).toString('base64')}`,
@@ -179,7 +197,7 @@ export async function sendPasswordResetEmail(email: string, userId: string): Pro
 
   const db = getDb();
   db.prepare('DELETE FROM password_reset_tokens WHERE user_id = ?').run(userId);
-  db.prepare('INSERT INTO password_reset_tokens (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, userId, expiresAt);
+  db.prepare('INSERT INTO password_reset_tokens (token, user_id, expires_at) VALUES (?, ?, ?)').run(hashToken(token), userId, expiresAt);
 
   const baseUrl = env.LAUNCHPAD_BASE_URL || 'http://localhost:5173';
   const resetUrl = `${baseUrl}/auth/reset-password?token=${token}`;

@@ -2,6 +2,7 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
 import { hashPassword } from '$lib/server/auth';
+import { hashToken } from '$lib/server/email';
 import { isRateLimited } from '$lib/server/ratelimit';
 
 function isStrongPassword(password: string): boolean {
@@ -38,9 +39,10 @@ export const POST: RequestHandler = async ({ request, getClientAddress }) => {
   }
 
   const db = getDb();
+  const tokenHash = hashToken(token);
   const resetToken = db.prepare(
     "SELECT * FROM password_reset_tokens WHERE token = ? AND expires_at > datetime('now')"
-  ).get(token) as any;
+  ).get(tokenHash) as any;
 
   if (!resetToken) {
     return json({ error: 'Invalid or expired reset link. Please request a new one.' }, { status: 400 });
@@ -48,7 +50,7 @@ export const POST: RequestHandler = async ({ request, getClientAddress }) => {
 
   const passwordHash = await hashPassword(password);
   db.prepare("UPDATE users SET password_hash = ?, token_version = token_version + 1, updated_at = datetime('now') WHERE id = ?").run(passwordHash, resetToken.user_id);
-  db.prepare('DELETE FROM password_reset_tokens WHERE token = ?').run(token);
+  db.prepare('DELETE FROM password_reset_tokens WHERE token = ?').run(tokenHash);
 
   return json({ ok: true });
 };

@@ -2,7 +2,7 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
 import { isSafeWebhookUrl } from '$lib/server/alertEvaluator';
-import https from 'https';
+import { safePostJson } from '$lib/server/ssrf';
 
 export const POST: RequestHandler = async ({ locals, params }) => {
   if (!locals.user) return json({ error: 'Unauthorized' }, { status: 401 });
@@ -10,8 +10,12 @@ export const POST: RequestHandler = async ({ locals, params }) => {
   const db = getDb();
   const membership = db.prepare(
     'SELECT role FROM org_members WHERE org_id = ? AND user_id = ?'
-  ).get(params.org_id, locals.user.id);
-  if (!membership) return json({ error: 'Forbidden' }, { status: 403 });
+  ).get(params.org_id, locals.user.id) as { role: string } | undefined;
+  // Triggering an outbound webhook is a write-shaped side effect — restrict to
+  // owner/admin, matching alert create/update/delete. Viewers are read-only.
+  if (!membership || !['owner', 'admin'].includes(membership.role)) {
+    return json({ error: 'Forbidden' }, { status: 403 });
+  }
 
   const instance = db.prepare(
     'SELECT id FROM instances WHERE id = ? AND org_id = ? AND deleted_at IS NULL'
@@ -43,36 +47,17 @@ export const POST: RequestHandler = async ({ locals, params }) => {
   });
 
   try {
-    const url = new URL(rule.webhook_url);
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Webhook timed out')), 10_000);
-      const req = https.request(
-        {
-          hostname: url.hostname,
-          port: url.port || 443,
-          path: url.pathname + url.search,
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
-        },
-        (res) => {
-          res.resume();
-          res.on('end', () => {
-            clearTimeout(timeout);
-            if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-              resolve();
-            } else {
-              reject(new Error(`Webhook returned HTTP ${res.statusCode}`));
-            }
-          });
-        },
-      );
-      req.on('error', (err) => { clearTimeout(timeout); reject(err); });
-      req.write(payload);
-      req.end();
-    });
-
+    // Resolves + pins the IP (SSRF / DNS-rebinding safe) before sending.
+    const { status } = await safePostJson(rule.webhook_url, payload, { timeoutMs: 10_000 });
+    if (status < 200 || status >= 300) {
+      return json({ error: `Webhook returned HTTP ${status}` }, { status: 502 });
+    }
     return json({ success: true });
   } catch (err) {
-    return json({ error: err instanceof Error ? err.message : 'Webhook failed' }, { status: 502 });
+    // Don't leak internal resolution/transport detail to the caller.
+    const message = err instanceof Error && /not allowed|private address|Invalid URL|scheme/.test(err.message)
+      ? 'Webhook URL is not allowed'
+      : 'Webhook delivery failed';
+    return json({ error: message }, { status: 502 });
   }
 };

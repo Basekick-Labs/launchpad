@@ -23,9 +23,16 @@ export const POST: RequestHandler = async ({ request, cookies, getClientAddress 
     return json({ error: 'Invalid or expired MFA session. Please log in again.' }, { status: 401 });
   }
 
+  // Per-user throttle in addition to per-IP: keyed on the (unspoofable) user id
+  // from the signed MFA token, so rotating X-Forwarded-For can't widen the
+  // brute-force window against the 6-digit code.
+  if (isRateLimited(`mfa_verify_user:${payload.userId}`, 5, 5 * 60 * 1000)) {
+    return json({ error: 'Too many attempts. Please try again later.' }, { status: 429 });
+  }
+
   const db = getDb();
   const user = db.prepare(
-    'SELECT id, email, first_name, last_name, mfa_secret, token_version, suspended_at, deleted_at FROM users WHERE id = ?'
+    'SELECT id, email, first_name, last_name, mfa_secret, mfa_last_timestep, token_version, suspended_at, deleted_at FROM users WHERE id = ?'
   ).get(payload.userId) as any;
 
   if (!user || !user.mfa_secret || user.suspended_at || user.deleted_at) {
@@ -45,9 +52,16 @@ export const POST: RequestHandler = async ({ request, cookies, getClientAddress 
     // Mark recovery code as used
     db.prepare("UPDATE mfa_recovery_codes SET used_at = datetime('now') WHERE id = ?").run(result.matchedId);
   } else {
-    if (!verifyTotpCode(user.mfa_secret, code)) {
+    const totp = verifyTotpCode(user.mfa_secret, code);
+    if (!totp) {
       return json({ error: 'Invalid code' }, { status: 401 });
     }
+    // Anti-replay: reject a code whose timestep was already accepted, so the
+    // same code can't be reused within its ±window validity period.
+    if (user.mfa_last_timestep !== null && totp.timestep <= user.mfa_last_timestep) {
+      return json({ error: 'Invalid code' }, { status: 401 });
+    }
+    db.prepare('UPDATE users SET mfa_last_timestep = ? WHERE id = ?').run(totp.timestep, user.id);
   }
 
   // Issue real session

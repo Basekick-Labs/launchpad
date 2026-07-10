@@ -59,7 +59,10 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
     const { admin_token: _t, ...safeInstance } = updated!;
     return json({ instance: safeInstance });
   } catch (err: any) {
-    return json({ error: err.message }, { status: 400 });
+    const message = /valid Arc server URL/i.test(err?.message || '')
+      ? err.message
+      : 'Could not update the instance. Check the endpoint URL and try again.';
+    return json({ error: message }, { status: 400 });
   }
 };
 

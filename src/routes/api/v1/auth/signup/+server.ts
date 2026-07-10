@@ -7,6 +7,7 @@ import { env } from '$env/dynamic/private';
 import { getDb } from '$lib/server/db';
 import { hashPassword, createToken, sessionCookieOptions } from '$lib/server/auth';
 import { isRateLimited } from '$lib/server/ratelimit';
+import { isValidEmail } from '$lib/server/util';
 
 async function verifyCaptcha(token: string, ip: string): Promise<boolean> {
   const secret = env.TURNSTILE_SECRET_KEY;
@@ -60,6 +61,10 @@ export const POST: RequestHandler = async ({ request, cookies, getClientAddress 
   // Normalize email so signup/login lookups are case-insensitive and consistent.
   const email = String(rawEmail).trim().toLowerCase();
 
+  if (!isValidEmail(email)) {
+    return json({ error: 'Please enter a valid email address.' }, { status: 400 });
+  }
+
   // Verify captcha if configured
   if (env.TURNSTILE_SECRET_KEY) {
     if (!captchaToken) {
@@ -88,61 +93,91 @@ export const POST: RequestHandler = async ({ request, cookies, getClientAddress 
 
   const db = getDb();
 
-  // First-run bootstrap: on an empty database the first account becomes the admin.
-  const userCount = (db.prepare(
+  // Pre-check for a friendly error before doing the expensive hash. The
+  // authoritative check runs inside the transaction below.
+  const pendingInviteToken = cookies.get('arc_pending_invite');
+  const preCount = (db.prepare(
     'SELECT COUNT(*) as count FROM users WHERE deleted_at IS NULL'
   ).get() as { count: number }).count;
-  const isFirstUser = userCount === 0;
-
-  // Check for pending invite — used to allow invited signups and link the org.
-  const pendingInviteToken = cookies.get('arc_pending_invite');
-  let isInviteSignup = false;
-  let inviteGrantsOperator = false;
-  if (pendingInviteToken) {
-    const invitation = db.prepare(
-      "SELECT * FROM org_invitations WHERE token = ? AND expires_at > datetime('now')"
-    ).get(pendingInviteToken) as any;
-
-    if (invitation && invitation.email.toLowerCase() === email.toLowerCase()) {
-      isInviteSignup = true;
-      inviteGrantsOperator = invitation.grant_operator === 1;
-      // Invalidate the invitation to prevent reuse
-      db.prepare('DELETE FROM org_invitations WHERE token = ?').run(pendingInviteToken);
-    }
-  }
-
-  // After the first admin exists, self-service signup is closed — accounts are
-  // created by admin invitation only.
-  if (!isFirstUser && !isInviteSignup) {
+  if (preCount > 0 && !pendingInviteToken) {
     return json({ error: 'Signups are by invitation only. Ask an administrator for an invite.' }, { status: 403 });
   }
 
-  const existing = db.prepare('SELECT id FROM users WHERE email = ? AND deleted_at IS NULL').get(email);
-  if (existing) {
-    return json({ error: 'An account with this email already exists.' }, { status: 409 });
-  }
-
+  // Hash outside the transaction (bcrypt is async; better-sqlite3 txns are sync).
   const userId = uuidv4();
   const passwordHash = await hashPassword(password);
-
-  // Self-hosted: no email verification step — accounts are usable immediately.
   const fname = first_name || name || null;
   const lname = last_name || null;
-  const isOperator = isFirstUser || inviteGrantsOperator ? 1 : 0;
-  db.prepare('INSERT INTO users (id, email, password_hash, first_name, last_name, email_verified, is_operator) VALUES (?, ?, ?, ?, ?, 1, ?)')
-    .run(userId, email, passwordHash, fname, lname, isOperator);
-
-  const orgId = uuidv4();
   const displayName = [fname, lname].filter(Boolean).join(' ');
+  const orgId = uuidv4();
   const orgName = displayName ? `${displayName}'s Organization` : 'My Organization';
-  db.prepare('INSERT INTO organizations (id, name, owner_user_id) VALUES (?, ?, ?)').run(orgId, orgName, userId);
-  db.prepare("INSERT INTO org_members (org_id, user_id, role) VALUES (?, ?, 'owner')").run(orgId, userId);
+
+  // All bootstrap/invite/uniqueness decisions happen atomically so two
+  // concurrent first-user signups can't both mint an operator, and an invite
+  // can't be redeemed twice.
+  type Outcome =
+    | { ok: true; isInviteSignup: boolean }
+    | { ok: false; status: number; error: string };
+
+  const runSignup = db.transaction((): Outcome => {
+    // Re-read the count INSIDE the transaction — this is the authoritative
+    // first-user determination.
+    const count = (db.prepare(
+      'SELECT COUNT(*) as count FROM users WHERE deleted_at IS NULL'
+    ).get() as { count: number }).count;
+    const isFirstUser = count === 0;
+
+    let isInviteSignup = false;
+    let inviteGrantsOperator = false;
+    if (pendingInviteToken) {
+      const invitation = db.prepare(
+        "SELECT * FROM org_invitations WHERE token = ? AND expires_at > datetime('now')"
+      ).get(pendingInviteToken) as any;
+      if (invitation && invitation.email.toLowerCase() === email) {
+        isInviteSignup = true;
+        inviteGrantsOperator = invitation.grant_operator === 1;
+        db.prepare('DELETE FROM org_invitations WHERE token = ?').run(pendingInviteToken);
+      }
+    }
+
+    if (!isFirstUser && !isInviteSignup) {
+      return { ok: false, status: 403, error: 'Signups are by invitation only. Ask an administrator for an invite.' };
+    }
+
+    const existing = db.prepare('SELECT id FROM users WHERE email = ? AND deleted_at IS NULL').get(email);
+    if (existing) {
+      return { ok: false, status: 409, error: 'An account with this email already exists.' };
+    }
+
+    const isOperator = isFirstUser || inviteGrantsOperator ? 1 : 0;
+    db.prepare('INSERT INTO users (id, email, password_hash, first_name, last_name, email_verified, is_operator) VALUES (?, ?, ?, ?, ?, 1, ?)')
+      .run(userId, email, passwordHash, fname, lname, isOperator);
+    db.prepare('INSERT INTO organizations (id, name, owner_user_id) VALUES (?, ?, ?)').run(orgId, orgName, userId);
+    db.prepare("INSERT INTO org_members (org_id, user_id, role) VALUES (?, ?, 'owner')").run(orgId, userId);
+
+    return { ok: true, isInviteSignup };
+  });
+
+  let outcome: Outcome;
+  try {
+    outcome = runSignup();
+  } catch (err) {
+    // UNIQUE(email) collision from a concurrent insert lands here.
+    if (err instanceof Error && /UNIQUE/i.test(err.message)) {
+      return json({ error: 'An account with this email already exists.' }, { status: 409 });
+    }
+    throw err;
+  }
+
+  if (!outcome.ok) {
+    return json({ error: outcome.error }, { status: outcome.status });
+  }
 
   // Auto-login the new account.
   const token = createToken({ userId, email, name: displayName });
   cookies.set('arc_session', token, sessionCookieOptions);
 
   return json({
-    redirectTo: isInviteSignup ? `/invite/${pendingInviteToken}` : '/dashboard',
+    redirectTo: outcome.isInviteSignup ? `/invite/${pendingInviteToken}` : '/dashboard',
   }, { status: 201 });
 };
