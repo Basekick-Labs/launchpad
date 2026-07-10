@@ -100,7 +100,7 @@
       if (msg.includes('Cannot GET') || msg.includes('404') || msg.includes('not found')) {
         featureAvailable = false;
         error = 'Token management is not available in this Arc version';
-      } else if (msg.includes('admin') || msg.includes('403') || msg.includes('Permission denied')) {
+      } else if (msg.includes('admin') || msg.includes('403') || msg.includes('Forbidden') || msg.includes('Permission denied')) {
         adminRequired = true;
         error = 'Admin permission required to manage tokens';
       } else {

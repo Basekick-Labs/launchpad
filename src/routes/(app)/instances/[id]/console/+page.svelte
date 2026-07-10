@@ -10,12 +10,13 @@
   import RetentionPolicies from '$lib/components/RetentionPolicies.svelte';
   import ContinuousQueries from '$lib/components/ContinuousQueries.svelte';
   import Alerts from '$lib/components/Alerts.svelte';
+  import MqttSubscriptions from '$lib/components/MqttSubscriptions.svelte';
   import { LogExplorer } from '$lib/components/logs';
   import StatusBar from '$lib/components/StatusBar.svelte';
   import { Button } from '$lib/components/ui/button';
   import {
     ArrowLeft, Terminal, Activity, FileText, Database,
-    Clock, BarChart3, Key, Bell
+    Clock, BarChart3, Key, Bell, Radio
   } from 'lucide-svelte';
 
   export let data: any;
@@ -28,7 +29,7 @@
   let loading = true;
   let error = '';
 
-  type ViewId = 'console' | 'monitoring' | 'logs' | 'retention' | 'continuous-queries' | 'alerts' | 'tokens';
+  type ViewId = 'console' | 'monitoring' | 'logs' | 'retention' | 'continuous-queries' | 'alerts' | 'mqtt' | 'tokens';
   let activeView: ViewId = 'console';
   async function setView(id: string) {
     activeView = id as ViewId;
@@ -50,6 +51,7 @@
     { id: 'retention', label: 'Retention', icon: Clock, disabled: false },
     { id: 'continuous-queries', label: 'Continuous Queries', icon: BarChart3, disabled: false },
     { id: 'alerts', label: 'Alerts', icon: Bell, disabled: false },
+    { id: 'mqtt', label: 'MQTT', icon: Radio, disabled: false },
     { id: 'tokens', label: 'Tokens', icon: Key, disabled: false },
   ];
 
@@ -136,6 +138,8 @@
         <ContinuousQueries {client} />
       {:else if activeView === 'alerts'}
         <Alerts orgId={org?.id ?? ''} {instanceId} />
+      {:else if activeView === 'mqtt'}
+        <MqttSubscriptions {client} currentRole={data.currentRole ?? 'viewer'} />
       {:else if activeView === 'tokens'}
         <TokenManager {client} arcVersion={connection?.arc_version ?? ''} />
       {/if}

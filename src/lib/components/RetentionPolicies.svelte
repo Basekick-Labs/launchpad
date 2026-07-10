@@ -84,6 +84,8 @@
       } else if (errorMsg.includes('disabled')) {
         isFeatureDisabled = true;
         error = null;
+      } else if (errorMsg.includes('Forbidden') || errorMsg.includes('403')) {
+        error = 'Admin access is required to manage retention policies.';
       } else {
         error = errorMsg;
       }
