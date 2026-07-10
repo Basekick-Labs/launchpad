@@ -263,6 +263,88 @@ export interface RotateTokenResponse {
   new_token: string;
 }
 
+// ---- MQTT ----
+// Mirrors Arc's mqtt.Subscription (internal/mqtt/subscription.go). Arc owns all
+// state; Launchpad drives these through the instance proxy. The password is
+// never returned — `has_password` reflects whether one is stored.
+export type MqttStatus = 'stopped' | 'running' | 'error' | 'paused';
+
+export interface MqttSubscription {
+  id: string;
+  name: string;
+  broker: string;
+  client_id: string;
+  topics: string[];
+  qos: number;
+  database: string;
+  username?: string;
+  has_password: boolean;
+  tls_enabled: boolean;
+  tls_cert_path?: string;
+  tls_key_path?: string;
+  tls_ca_path?: string;
+  tls_insecure_skip_verify: boolean;
+  auto_start: boolean;
+  status: MqttStatus;
+  error_message?: string;
+  topic_mapping?: Record<string, string>;
+  keep_alive_seconds: number;
+  connect_timeout_seconds: number;
+  reconnect_min_seconds: number;
+  reconnect_max_seconds: number;
+  clean_session: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MqttSubscriptionStats {
+  id: string;
+  name: string;
+  status: string;
+  messages_received: number;
+  messages_failed: number;
+  bytes_received: number;
+  last_message_at?: string;
+  connected_since?: string;
+  reconnects: number;
+}
+
+// Create payload. `password` is plaintext-in (encrypted at rest by Arc; requires
+// ARC_ENCRYPTION_KEY on the instance). Fields with sensible Arc defaults are
+// optional here.
+export interface CreateMqttSubscription {
+  name: string;
+  broker: string;
+  client_id?: string;
+  topics: string[];
+  qos?: number;
+  database: string;
+  username?: string;
+  password?: string;
+  tls_enabled?: boolean;
+  tls_cert_path?: string;
+  tls_key_path?: string;
+  tls_ca_path?: string;
+  tls_insecure_skip_verify?: boolean;
+  auto_start?: boolean;
+  topic_mapping?: Record<string, string>;
+  keep_alive_seconds?: number;
+  connect_timeout_seconds?: number;
+  reconnect_min_seconds?: number;
+  reconnect_max_seconds?: number;
+  clean_session?: boolean;
+}
+
+// Update payload: every field optional (omit = leave unchanged). Send
+// password: '' to clear a stored password, omit to keep it.
+export type UpdateMqttSubscription = Partial<CreateMqttSubscription>;
+
+export interface MqttHealth {
+  status: 'healthy' | 'degraded' | 'unhealthy' | 'disabled';
+  healthy: boolean;
+  subscriptions?: { total: number; running: number; stopped: number; errors: number };
+}
+
 export class ArcClient {
   constructor(private baseURL: string, private token: string) {}
 
@@ -770,5 +852,113 @@ export class ArcClient {
       const error = await response.text();
       throw new Error(`Failed to revoke token: ${error}`);
     }
+  }
+
+  // ---- MQTT ----
+  // All routes require Arc's `admin` permission, satisfied by the admin token
+  // the proxy injects. Arc returns `503 {"error":"MQTT subsystem disabled"}`
+  // when MQTT is off in arc.toml; the health check distinguishes that state.
+
+  private mqttError(prefix: string, body: string): Error {
+    // Arc wraps errors as {"success":false,"error":"..."}; fall back to raw text.
+    try {
+      const parsed = JSON.parse(body) as { error?: string };
+      if (parsed?.error) return new Error(parsed.error);
+    } catch { /* not JSON */ }
+    return new Error(`${prefix}: ${body}`);
+  }
+
+  async getMqttHealth(): Promise<MqttHealth> {
+    const response = await fetch(`${this.baseURL}/api/v1/mqtt/health`, {
+      headers: { 'Authorization': `Bearer ${this.token}` }
+    });
+    if (!response.ok) {
+      throw this.mqttError('Failed to fetch MQTT health', await response.text());
+    }
+    return response.json();
+  }
+
+  async listMqttSubscriptions(): Promise<MqttSubscription[]> {
+    const response = await fetch(`${this.baseURL}/api/v1/mqtt/subscriptions`, {
+      headers: { 'Authorization': `Bearer ${this.token}` }
+    });
+    if (!response.ok) {
+      throw this.mqttError('Failed to list MQTT subscriptions', await response.text());
+    }
+    const data = await response.json() as { subscriptions?: MqttSubscription[] };
+    return data.subscriptions ?? [];
+  }
+
+  async getMqttSubscription(id: string): Promise<MqttSubscription> {
+    const response = await fetch(`${this.baseURL}/api/v1/mqtt/subscriptions/${encodeURIComponent(id)}`, {
+      headers: { 'Authorization': `Bearer ${this.token}` }
+    });
+    if (!response.ok) {
+      throw this.mqttError('Failed to fetch MQTT subscription', await response.text());
+    }
+    const data = await response.json() as { subscription: MqttSubscription };
+    return data.subscription;
+  }
+
+  async createMqttSubscription(sub: CreateMqttSubscription): Promise<MqttSubscription> {
+    const response = await fetch(`${this.baseURL}/api/v1/mqtt/subscriptions`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(sub)
+    });
+    if (!response.ok) {
+      throw this.mqttError('Failed to create MQTT subscription', await response.text());
+    }
+    const data = await response.json() as { subscription: MqttSubscription };
+    return data.subscription;
+  }
+
+  async updateMqttSubscription(id: string, sub: UpdateMqttSubscription): Promise<MqttSubscription> {
+    const response = await fetch(`${this.baseURL}/api/v1/mqtt/subscriptions/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Authorization': `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(sub)
+    });
+    if (!response.ok) {
+      throw this.mqttError('Failed to update MQTT subscription', await response.text());
+    }
+    const data = await response.json() as { subscription: MqttSubscription };
+    return data.subscription;
+  }
+
+  async deleteMqttSubscription(id: string): Promise<void> {
+    const response = await fetch(`${this.baseURL}/api/v1/mqtt/subscriptions/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${this.token}` }
+    });
+    if (!response.ok) {
+      throw this.mqttError('Failed to delete MQTT subscription', await response.text());
+    }
+  }
+
+  private async mqttLifecycle(id: string, action: 'start' | 'stop' | 'pause' | 'restart'): Promise<void> {
+    const response = await fetch(`${this.baseURL}/api/v1/mqtt/subscriptions/${encodeURIComponent(id)}/${action}`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${this.token}` }
+    });
+    if (!response.ok) {
+      throw this.mqttError(`Failed to ${action} MQTT subscription`, await response.text());
+    }
+  }
+
+  startMqttSubscription(id: string): Promise<void> { return this.mqttLifecycle(id, 'start'); }
+  stopMqttSubscription(id: string): Promise<void> { return this.mqttLifecycle(id, 'stop'); }
+  pauseMqttSubscription(id: string): Promise<void> { return this.mqttLifecycle(id, 'pause'); }
+  restartMqttSubscription(id: string): Promise<void> { return this.mqttLifecycle(id, 'restart'); }
+
+  async getMqttSubscriptionStats(id: string): Promise<MqttSubscriptionStats> {
+    const response = await fetch(`${this.baseURL}/api/v1/mqtt/subscriptions/${encodeURIComponent(id)}/stats`, {
+      headers: { 'Authorization': `Bearer ${this.token}` }
+    });
+    if (!response.ok) {
+      throw this.mqttError('Failed to fetch MQTT stats', await response.text());
+    }
+    const data = await response.json() as { stats: MqttSubscriptionStats };
+    return data.stats;
   }
 }
