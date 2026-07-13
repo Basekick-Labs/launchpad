@@ -1,9 +1,32 @@
 import type { Handle } from '@sveltejs/kit';
+import { env } from '$env/dynamic/private';
 import { verifyToken } from '$lib/server/auth';
 import { getDb } from '$lib/server/db';
 import { purgeExpiredInstances, refreshAllInstanceHealth } from '$lib/server/instance';
 import { evaluateAlerts } from '$lib/server/alertEvaluator';
 import { notifyOps, cleanupAlertDedup } from '$lib/server/gchatAlert';
+
+// The public base for server-issued redirects. Behind a reverse proxy (or when
+// the browser has upgraded us to HTTPS via HSTS), `event.url.origin` is derived
+// from request headers and can come out as the wrong scheme/port — e.g.
+// `https://localhost` with no port. When the operator has set LAUNCHPAD_BASE_URL,
+// trust that instead so redirects land on the URL the deployment is actually
+// served from. Fall back to the request origin when it's unset.
+const CONFIGURED_BASE_URL = (() => {
+  const raw = env.LAUNCHPAD_BASE_URL?.trim();
+  if (!raw) return null;
+  try {
+    return new URL(raw).origin;
+  } catch {
+    console.warn(`[hooks] LAUNCHPAD_BASE_URL is not a valid URL: ${raw}`);
+    return null;
+  }
+})();
+
+function redirectTo(path: string, event: { url: URL }): Response {
+  const base = CONFIGURED_BASE_URL ?? event.url.origin;
+  return Response.redirect(new URL(path, base).toString(), 302);
+}
 
 function runJob(name: string, fn: () => Promise<unknown>): Promise<void> {
   return fn().then(() => {}).catch((err: any) => {
@@ -98,13 +121,13 @@ export const handle: Handle = async ({ event, resolve }) => {
     path.startsWith('/images/') ||
     path === '/favicon.ico';
   if (!hasUser && !firstRunAllowed) {
-    return Response.redirect(new URL('/setup', event.url.origin).toString(), 302);
+    return redirectTo('/setup', event);
   }
   // Once setup is complete, the wizard page is gone — redirect it to login.
   // (Its sub-routes like /setup/test-email return their own 403, so only the
   // page itself is redirected.)
   if (hasUser && path === '/setup') {
-    return Response.redirect(new URL('/login', event.url.origin).toString(), 302);
+    return redirectTo('/login', event);
   }
 
   const response = await resolve(event);
@@ -113,7 +136,19 @@ export const handle: Handle = async ({ event, resolve }) => {
   // SvelteKit can hash its own inline hydration scripts.
   response.headers.set('X-Frame-Options', 'DENY');
   response.headers.set('X-Content-Type-Options', 'nosniff');
-  response.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  // Only advertise HSTS on genuinely-HTTPS deployments. Sending it on a plain-HTTP
+  // deployment (e.g. http://localhost:3000) makes the browser permanently upgrade
+  // requests to https://, which then fails — the classic "redirected to
+  // https://localhost" trap. Gate on the configured base URL's scheme, falling
+  // back to the request/forwarded protocol.
+  const isHttps =
+    (CONFIGURED_BASE_URL ?? '').startsWith('https:') ||
+    (!CONFIGURED_BASE_URL &&
+      (event.url.protocol === 'https:' ||
+        event.request.headers.get('x-forwarded-proto') === 'https'));
+  if (isHttps) {
+    response.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
   response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
   response.headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
 

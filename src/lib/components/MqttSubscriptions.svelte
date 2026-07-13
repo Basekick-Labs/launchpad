@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import type {
     ArcClient,
     MqttSubscription,
@@ -83,7 +83,53 @@
 
   const BROKER_SCHEMES = ['tcp://', 'ssl://', 'ws://', 'wss://', 'mqtt://', 'mqtts://'];
 
+  // Live-stats poll: refresh the in-memory counters for running subscriptions
+  // once a second so "messages received / bytes" tick in near-real-time,
+  // without re-fetching health + the full subscription list every tick.
+  const STATS_POLL_MS = 1000;
+  let statsTimer: ReturnType<typeof setInterval> | null = null;
+  let statsInFlight = false;
+
   onMount(() => { if (canManage) refresh(); });
+  onDestroy(() => stopStatsPoll());
+
+  function startStatsPoll() {
+    if (statsTimer || !canManage) return;
+    statsTimer = setInterval(refreshStats, STATS_POLL_MS);
+  }
+
+  function stopStatsPoll() {
+    if (statsTimer) {
+      clearInterval(statsTimer);
+      statsTimer = null;
+    }
+  }
+
+  // Cheap poll: only the live counters for currently-running subscriptions.
+  // No health/list re-fetch and no `loading` spinner, so it can run every second.
+  async function refreshStats() {
+    if (!canManage || statsInFlight) return;
+    const running = subscriptions.filter((s) => s.status === 'running');
+    if (running.length === 0) {
+      stopStatsPoll();
+      return;
+    }
+    statsInFlight = true;
+    try {
+      const results = await Promise.allSettled(running.map((s) => client.getMqttSubscriptionStats(s.id)));
+      const next: Record<string, MqttSubscriptionStats> = {};
+      running.forEach((s, i) => {
+        const r = results[i];
+        if (r.status === 'fulfilled') next[s.id] = r.value;
+      });
+      statsById = next;
+    } catch {
+      // Transient stats fetch failures are non-fatal; keep the last values and
+      // retry on the next tick rather than toasting once a second.
+    } finally {
+      statsInFlight = false;
+    }
+  }
 
   async function refresh() {
     if (!canManage) return;
@@ -92,19 +138,17 @@
       health = await client.getMqttHealth();
       if (health.status === 'disabled') {
         subscriptions = [];
+        stopStatsPoll();
         return;
       }
       subscriptions = await client.listMqttSubscriptions();
-      // Pull live stats for running subscriptions (counters are in-memory in Arc
-      // and only meaningful while running).
-      const running = subscriptions.filter((s) => s.status === 'running');
-      const results = await Promise.allSettled(running.map((s) => client.getMqttSubscriptionStats(s.id)));
-      const next: Record<string, MqttSubscriptionStats> = {};
-      running.forEach((s, i) => {
-        const r = results[i];
-        if (r.status === 'fulfilled') next[s.id] = r.value;
-      });
-      statsById = next;
+      // Pull live stats once now, then let the poller keep them fresh.
+      await refreshStats();
+      if (subscriptions.some((s) => s.status === 'running')) {
+        startStatsPoll();
+      } else {
+        stopStatsPoll();
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to load MQTT subscriptions');
     } finally {
