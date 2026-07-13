@@ -1,8 +1,8 @@
 import { redirect } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import crypto from 'crypto';
-import { dev } from '$app/environment';
 import { env } from '$env/dynamic/private';
+import { deploymentIsHttps } from '$lib/server/auth';
 import { isRateLimited } from '$lib/server/ratelimit';
 
 export const GET: RequestHandler = async ({ cookies, getClientAddress }) => {
@@ -24,7 +24,7 @@ export const GET: RequestHandler = async ({ cookies, getClientAddress }) => {
   cookies.set('google_oauth_state', state, {
     path: '/',
     httpOnly: true,
-    secure: !dev, // consistent with the session cookie; allows http on localhost
+    secure: deploymentIsHttps, // consistent with the session cookie; allows http on localhost
     sameSite: 'lax',
     maxAge: 300,
   });

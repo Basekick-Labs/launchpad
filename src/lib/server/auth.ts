@@ -63,13 +63,36 @@ export function verifyToken(token: string): JwtPayload | null {
 export const SESSION_COOKIE = 'arc_session';
 
 /**
- * Cookie options for the session cookie. `secure` is disabled in dev so the
- * cookie is stored over plain HTTP (http://localhost); enabled in production.
+ * Whether this deployment is served over HTTPS. Drives the `secure` cookie flag:
+ * a `secure` cookie is silently dropped by the browser over plain HTTP, so a
+ * production deployment on http:// (localhost, an internal network, or with TLS
+ * terminated at a proxy that forwards http to the app) must NOT set it — otherwise
+ * the session cookie never persists and login appears to "succeed" but bounces
+ * straight back to /login. Derive it from the configured public URL's scheme;
+ * default to true in production when unset (safe for the common HTTPS case) and
+ * false in dev.
+ */
+export const deploymentIsHttps = (() => {
+  const raw = env.LAUNCHPAD_BASE_URL?.trim();
+  if (raw) {
+    try {
+      return new URL(raw).protocol === 'https:';
+    } catch {
+      // fall through to the env-based default
+    }
+  }
+  return !dev;
+})();
+
+/**
+ * Cookie options for the session cookie. `secure` tracks whether the deployment
+ * is actually HTTPS (see `deploymentIsHttps`), not merely dev-vs-prod, so a
+ * plain-HTTP production deploy can still hold its session cookie.
  */
 export const sessionCookieOptions = {
   path: '/' as const,
   httpOnly: true,
-  secure: !dev,
+  secure: deploymentIsHttps,
   sameSite: 'lax' as const,
   maxAge: 60 * 60 * 24 * 7,
 };

@@ -1,6 +1,6 @@
 import { redirect } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { dev } from '$app/environment';
+import { deploymentIsHttps } from '$lib/server/auth';
 import { getDb } from '$lib/server/db';
 
 export const GET: RequestHandler = async ({ params, locals, cookies }) => {
@@ -53,7 +53,7 @@ export const GET: RequestHandler = async ({ params, locals, cookies }) => {
   cookies.set('arc_pending_invite', params.token, {
     path: '/',
     httpOnly: true,
-    secure: !dev,
+    secure: deploymentIsHttps,
     sameSite: 'lax',
     maxAge: 60 * 60 * 24, // 1 day
   });

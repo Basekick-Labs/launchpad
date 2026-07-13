@@ -2,7 +2,7 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
 import { ACTIVE_ORG_COOKIE } from '$lib/server/activeOrg';
-import { dev } from '$app/environment';
+import { deploymentIsHttps } from '$lib/server/auth';
 
 export const POST: RequestHandler = async ({ locals, request, cookies }) => {
   if (!locals.user) {
@@ -26,7 +26,7 @@ export const POST: RequestHandler = async ({ locals, request, cookies }) => {
   cookies.set(ACTIVE_ORG_COOKIE, org_id, {
     path: '/',
     httpOnly: true,
-    secure: !dev,
+    secure: deploymentIsHttps,
     sameSite: 'lax',
     maxAge: 60 * 60 * 24 * 365,
   });
