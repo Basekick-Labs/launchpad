@@ -123,7 +123,11 @@
     loadingMeasurements = true;
     try {
       const result = await client.query(`SHOW TABLES FROM ${database};`);
-      measurements = result.rows.map(row => row[0] as string);
+      // SHOW TABLES returns [database, table_name, storage_path, ...] — the
+      // measurement is the `table_name` column, not row[0] (which is the db name).
+      const nameIdx = result.columns.indexOf('table_name');
+      const idx = nameIdx >= 0 ? nameIdx : (result.columns.length > 1 ? 1 : 0);
+      measurements = result.rows.map(row => row[idx] as string);
     } catch (err) {
       console.error('Failed to load measurements:', err);
       measurements = [];
