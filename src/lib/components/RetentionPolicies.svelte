@@ -58,6 +58,18 @@
   let measurements: string[] = [];
   let loadingDatabases = false;
   let loadingMeasurements = false;
+  // True only after a successful load for the current database — distinguishes
+  // "db has no tables" from "not loaded / load failed" so the missing-value
+  // warning can't fire (or stay silent) on stale or absent data.
+  let measurementsLoaded = false;
+  let measurementsSeq = 0;
+
+  // Policies saved by versions with the SHOW TABLES row[0] bug can have the
+  // database name stored as measurement; surface that instead of rendering a
+  // silently-blank select that re-saves the bad value.
+  $: measurementMissing = !!editingPolicy && !!formMeasurement &&
+    !loadingMeasurements && measurementsLoaded &&
+    !measurements.includes(formMeasurement);
 
   // Expanded rows for details
   let expandedPolicyId: number | null = null;
@@ -97,8 +109,7 @@
   async function loadDatabases() {
     loadingDatabases = true;
     try {
-      const result = await client.query('SHOW DATABASES;');
-      databases = result.rows.map(row => row[0] as string);
+      databases = await client.getDatabases();
     } catch (err) {
       console.error('Failed to load databases:', err);
     } finally {
@@ -107,23 +118,27 @@
   }
 
   async function loadMeasurements(database: string) {
+    // Overlapping loads (rapid db switches, reopening the dialog) resolve in
+    // arbitrary order; only the latest request may touch component state.
+    const seq = ++measurementsSeq;
+    measurementsLoaded = false;
     if (!database) {
       measurements = [];
       return;
     }
     loadingMeasurements = true;
     try {
-      const result = await client.query(`SHOW TABLES FROM ${database};`);
-      // SHOW TABLES returns [database, table_name, storage_path, ...] — the
-      // measurement is the `table_name` column, not row[0] (which is the db name).
-      const nameIdx = result.columns.indexOf('table_name');
-      const idx = nameIdx >= 0 ? nameIdx : (result.columns.length > 1 ? 1 : 0);
-      measurements = result.rows.map(row => row[idx] as string);
+      const tables = await client.getTables(database);
+      if (seq !== measurementsSeq) return;
+      measurements = tables;
+      measurementsLoaded = true;
     } catch (err) {
+      if (seq !== measurementsSeq) return;
       console.error('Failed to load measurements:', err);
       measurements = [];
+      toast.error(err instanceof Error ? err.message : 'Failed to load measurements');
     } finally {
-      loadingMeasurements = false;
+      if (seq === measurementsSeq) loadingMeasurements = false;
     }
   }
 
@@ -188,6 +203,10 @@
     }
     if (formRetentionDays < 1) {
       formError = 'Retention days must be at least 1';
+      return;
+    }
+    if (measurementMissing) {
+      formError = `Measurement "${formMeasurement}" doesn't exist in ${formDatabase} — select an existing measurement or "All measurements"`;
       return;
     }
 
@@ -503,10 +522,19 @@
           disabled={!formDatabase || loadingMeasurements}
         >
           <option value="">All measurements</option>
+          {#if measurementMissing}
+            <option value={formMeasurement}>{formMeasurement} (missing)</option>
+          {/if}
           {#each measurements as m}
             <option value={m}>{m}</option>
           {/each}
         </select>
+        {#if measurementMissing}
+          <p class="text-xs text-destructive">
+            "{formMeasurement}" doesn't exist in {formDatabase}. Earlier versions could
+            save the database name here by mistake — select the real measurement or "All measurements".
+          </p>
+        {/if}
         <p class="text-xs text-muted-foreground">Leave empty to apply to all measurements in the database</p>
       </div>
 

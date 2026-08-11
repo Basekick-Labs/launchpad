@@ -64,6 +64,18 @@
   let measurements: string[] = [];
   let loadingDatabases = false;
   let loadingMeasurements = false;
+  // True only after a successful load for the current database — distinguishes
+  // "db has no tables" from "not loaded / load failed" so the missing-value
+  // warning can't fire (or stay silent) on stale or absent data.
+  let measurementsLoaded = false;
+  let measurementsSeq = 0;
+
+  // Queries saved by versions with the SHOW TABLES row[0] bug can have the
+  // database name stored as source_measurement; surface that instead of
+  // rendering a silently-blank select that re-saves the bad value.
+  $: sourceMeasurementMissing = !!editingQuery && !!formSourceMeasurement &&
+    !loadingMeasurements && measurementsLoaded &&
+    !measurements.includes(formSourceMeasurement);
 
   // Expanded rows for details
   let expandedQueryId: number | null = null;
@@ -106,8 +118,7 @@
   async function loadDatabases() {
     loadingDatabases = true;
     try {
-      const result = await client.query('SHOW DATABASES;');
-      databases = result.rows.map(row => row[0] as string);
+      databases = await client.getDatabases();
     } catch (err) {
       console.error('Failed to load databases:', err);
     } finally {
@@ -116,23 +127,27 @@
   }
 
   async function loadMeasurements(database: string) {
+    // Overlapping loads (rapid db switches, reopening the dialog) resolve in
+    // arbitrary order; only the latest request may touch component state.
+    const seq = ++measurementsSeq;
+    measurementsLoaded = false;
     if (!database) {
       measurements = [];
       return;
     }
     loadingMeasurements = true;
     try {
-      const result = await client.query(`SHOW TABLES FROM ${database};`);
-      // SHOW TABLES returns [database, table_name, storage_path, ...] — the
-      // measurement is the `table_name` column, not row[0] (which is the db name).
-      const nameIdx = result.columns.indexOf('table_name');
-      const idx = nameIdx >= 0 ? nameIdx : (result.columns.length > 1 ? 1 : 0);
-      measurements = result.rows.map(row => row[idx] as string);
+      const tables = await client.getTables(database);
+      if (seq !== measurementsSeq) return;
+      measurements = tables;
+      measurementsLoaded = true;
     } catch (err) {
+      if (seq !== measurementsSeq) return;
       console.error('Failed to load measurements:', err);
       measurements = [];
+      toast.error(err instanceof Error ? err.message : 'Failed to load measurements');
     } finally {
-      loadingMeasurements = false;
+      if (seq === measurementsSeq) loadingMeasurements = false;
     }
   }
 
@@ -222,6 +237,10 @@ ORDER BY 1`;
     }
     if (!formSourceMeasurement) {
       formError = 'Source measurement is required';
+      return;
+    }
+    if (sourceMeasurementMissing) {
+      formError = `Source measurement "${formSourceMeasurement}" doesn't exist in ${formDatabase} — select an existing measurement`;
       return;
     }
     if (!formDestinationMeasurement.trim()) {
@@ -600,10 +619,19 @@ ORDER BY 1`;
             disabled={!formDatabase || loadingMeasurements}
           >
             <option value="">Select source</option>
+            {#if sourceMeasurementMissing}
+              <option value={formSourceMeasurement}>{formSourceMeasurement} (missing)</option>
+            {/if}
             {#each measurements as m}
               <option value={m}>{m}</option>
             {/each}
           </select>
+          {#if sourceMeasurementMissing}
+            <p class="text-xs text-destructive">
+              "{formSourceMeasurement}" doesn't exist in {formDatabase}. Earlier versions could
+              save the database name here by mistake — select the real source measurement and update.
+            </p>
+          {/if}
         </div>
         <div class="space-y-2">
           <Label for="destination">Destination Measurement</Label>

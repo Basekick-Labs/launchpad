@@ -34,17 +34,10 @@
     const previouslyExpanded = new Set(expandedDatabases);
 
     try {
-      // Get list of databases
-      const result = await client.query('SHOW DATABASES;');
-
-      // Response format: { columns: ['database', 'tier'], data: [['db_name', 'hot'], ...] }
-      // Tier column is optional (only present when tiering is enabled)
-      const tierIndex = result.columns.indexOf('tier');
-
-      databases = result.rows.map(row => ({
-        database: row[0] as string,
+      databases = (await client.getDatabasesWithTier()).map(db => ({
+        database: db.name,
         tables: [],
-        tier: tierIndex >= 0 ? (row[tierIndex] as string) : null
+        tier: db.tier
       }));
 
       // Determine which databases to expand and load tables for
@@ -70,18 +63,14 @@
     loadingTables = loadingTables;
 
     try {
-      // Get tables for specific database
-      const result = await client.query(`SHOW TABLES FROM ${database};`);
-
-      // SHOW TABLES returns: [database, table_name, path, ...]
-      // Table name is in column 1 (index 1)
-      const tables = result.rows.map(row => row[1] as string);
+      const tables = await client.getTables(database);
 
       // Update the database with its tables
       databases = databases.map(db =>
         db.database === database ? { ...db, tables } : db
       );
     } catch (err) {
+      error = err instanceof Error ? err.message : `Failed to load tables for ${database}`;
       console.error(`Failed to load tables for ${database}:`, err);
     } finally {
       loadingTables.delete(database);

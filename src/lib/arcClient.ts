@@ -404,6 +404,55 @@ export class ArcClient {
     }
   }
 
+  /**
+   * List database names. SHOW DATABASES returns the name in column 0.
+   */
+  async getDatabases(): Promise<string[]> {
+    return (await this.getDatabasesWithTier()).map(db => db.name);
+  }
+
+  /**
+   * Like getDatabases, but keeps the optional `tier` column (present only
+   * when tiering is enabled on the instance; null otherwise).
+   */
+  async getDatabasesWithTier(): Promise<Array<{ name: string; tier: string | null }>> {
+    const result = await this.query('SHOW DATABASES;');
+    const tierIdx = result.columns.indexOf('tier');
+    return result.rows
+      .filter(row => typeof row[0] === 'string' && row[0].length > 0)
+      .map(row => ({
+        name: row[0] as string,
+        tier: tierIdx >= 0 && typeof row[tierIdx] === 'string' ? row[tierIdx] as string : null
+      }));
+  }
+
+  /**
+   * List table (measurement) names in a database. SHOW TABLES returns
+   * [database, table_name, storage_path, ...] — the name is the `table_name`
+   * column, and a table may appear once per storage row, hence the dedupe.
+   * Throws when that column is absent from a non-empty result rather than
+   * guessing an index, which would silently list database names or storage
+   * paths as tables. (An empty result returns [] without the column check.)
+   */
+  async getTables(database: string): Promise<string[]> {
+    // The name is interpolated into SQL. Call sites feed it stored values
+    // (CQ/retention rows), not just SHOW DATABASES output, so reject anything
+    // outside Arc's identifier charset instead of passing it to the engine.
+    if (!/^[A-Za-z0-9_-]+$/.test(database)) {
+      throw new Error(`Invalid database name: ${JSON.stringify(database)}`);
+    }
+    const result = await this.query(`SHOW TABLES FROM ${database};`);
+    if (result.rows.length === 0) return [];
+    const idx = result.columns.indexOf('table_name');
+    if (idx < 0) {
+      throw new Error(`Unexpected SHOW TABLES response: missing table_name column (columns: ${result.columns.join(', ') || 'none'})`);
+    }
+    const names = result.rows
+      .map(row => row[idx])
+      .filter((name): name is string => typeof name === 'string' && name.length > 0);
+    return [...new Set(names)];
+  }
+
   async getMeasurements(): Promise<string[]> {
     const response = await fetch(`${this.baseURL}/api/v1/measurements`, {
       headers: {

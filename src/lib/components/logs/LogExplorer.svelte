@@ -224,29 +224,23 @@
       error = null;
       tables = [];
 
-      // Get list of databases
-      const dbResult = await client.query('SHOW DATABASES;');
-      const dbNames = dbResult.rows.map(row => row[0] as string);
+      const dbNames = await client.getDatabases();
 
-      // For each database, get tables
-      for (const db of dbNames) {
+      const perDb = await Promise.all(dbNames.map(async db => {
         try {
-          const tableResult = await client.query(`SHOW TABLES FROM ${db};`);
-          // SHOW TABLES returns: [database, table_name, path, ...]
-          for (const row of tableResult.rows) {
-            const tableName = row[1] as string;
-            tables.push({
-              database: db,
-              table: tableName,
-              displayName: `${db}.${tableName}`,
-            });
-          }
-        } catch {
-          // Skip databases we can't access
+          return (await client.getTables(db)).map(tableName => ({
+            database: db,
+            table: tableName,
+            displayName: `${db}.${tableName}`,
+          }));
+        } catch (err) {
+          // Skip databases we can't access, but keep the failure diagnosable —
+          // getTables also throws on an unexpected response shape.
+          console.warn(`Skipping tables for ${db}:`, err);
+          return [];
         }
-      }
-
-      tables = tables; // Trigger reactivity
+      }));
+      tables = perDb.flat();
 
       // Try to restore last selected table from localStorage
       if (tables.length > 0 && !selectedTable) {
