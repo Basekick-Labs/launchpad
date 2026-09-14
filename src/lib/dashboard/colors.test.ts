@@ -140,17 +140,42 @@ describe('assignSeriesColors', () => {
 // ===========================================================================
 
 describe('resolveColor', () => {
-  it('turns every stored token into something a browser will render', () => {
-    // Most of NAMED_COLORS is NOT valid CSS — `dark-red`, `semi-dark-orange`,
-    // `text`, `panel-bg` — and a `style:` directive drops an invalid value
-    // silently, leaving the element to inherit. `green` and `red` are Grafana's
-    // defaults and happen to be real keywords, so the common case appears to
-    // work while every imported variant fails invisibly.
+  // NAMED_COLORS is a union of two sets with different rules: Grafana's tokens,
+  // which a browser cannot parse and which MUST be resolved, and the real CSS
+  // keywords, which may legitimately pass through. Asserting isSafeColor over
+  // the union would prove nothing either way — the token set is one of the
+  // things isSafeColor accepts, so an identity resolveColor would satisfy it.
+  const GRAFANA_ONLY = [
+    'text',
+    'panel-bg',
+    ...['blue', 'green', 'red', 'orange', 'yellow', 'purple'].flatMap((h) => [
+      `dark-${h}`,
+      `semi-dark-${h}`,
+      `light-${h}`,
+      `super-light-${h}`,
+    ]),
+  ];
+  const RENDERABLE = /^(#[0-9a-f]{3,8}|rgba?\(|hsla?\(|transparent$)/i;
+
+  it('resolves every token a browser cannot parse', () => {
+    // A `style:` directive drops an invalid value silently, leaving the element
+    // to inherit. `green` and `red` are Grafana's defaults and happen to be real
+    // keywords, so the common case appears to work while every imported variant
+    // fails invisibly.
+    expect(GRAFANA_ONLY).toHaveLength(26);
+    for (const token of GRAFANA_ONLY) {
+      for (const scheme of ['light', 'dark'] as const) {
+        expect(resolveColor(token, scheme), `${token} in ${scheme}`).toMatch(RENDERABLE);
+      }
+    }
+  });
+
+  it('leaves no stored token unresolvable', () => {
     for (const token of NAMED_COLORS) {
       for (const scheme of ['light', 'dark'] as const) {
         const out = resolveColor(token, scheme);
-        expect(out).toBeTruthy();
-        expect(isSafeColor(out) || out === 'transparent').toBe(true);
+        expect(out, `${token} in ${scheme}`).toBeTruthy();
+        expect(RENDERABLE.test(out) || NAMED_COLORS.has(out), `${token} in ${scheme}`).toBe(true);
       }
     }
   });
