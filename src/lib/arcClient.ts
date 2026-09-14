@@ -3,6 +3,15 @@ export interface QueryResult {
   rows: any[][];
   rowCount: number;
   executionTime?: number;
+  /**
+   * Arc capped the result set. Without surfacing this, a capped response is
+   * byte-identical to a complete one and a dashboard quietly draws conclusions
+   * from truncated data.
+   */
+  rowsCapped?: boolean;
+  rowCap?: number;
+  truncated?: boolean;
+  truncationReason?: string;
 }
 
 export type StatementStatus = 'pending' | 'running' | 'success' | 'error';
@@ -384,7 +393,11 @@ export class ArcClient {
       columns: apiResponse.columns || [],
       rows: apiResponse.data || [],
       rowCount: apiResponse.row_count || 0,
-      executionTime: apiResponse.execution_time_ms || executionTime
+      executionTime: apiResponse.execution_time_ms || executionTime,
+      rowsCapped: apiResponse.rows_capped ?? undefined,
+      rowCap: apiResponse.row_cap ?? undefined,
+      truncated: apiResponse.truncated ?? undefined,
+      truncationReason: apiResponse.truncation_reason ?? undefined
     };
   }
 

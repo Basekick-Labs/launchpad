@@ -130,6 +130,24 @@ export const LIMITS = {
   /** Errors returned before truncating; a hostile document fails every field. */
   maxErrors: 100,
   /**
+   * Rows a single frame will normalize. `maxDataPoints` is NOT this: it feeds
+   * the $__interval calculation, shaping the bucket width the macro suggests,
+   * and does not cap what Arc returns. Measured, normalizing 500k x 8 costs
+   * ~68ms and retains ~88MB — well past a frame budget, and #29 may run
+   * several panels per refresh tick.
+   */
+  maxFrameRows: 200_000,
+  /**
+   * Cells a long-to-wide pivot may produce (series x timestamps). Capping
+   * series alone is the wrong axis: 256 series x 100k timestamps is 25.6M
+   * slots, allocated before any cap notice could be written.
+   */
+  maxPivotCells: 1_000_000,
+  /** Rows scanned to infer a column's type. */
+  maxTypeScanRows: 10_000,
+  /** Non-null values sampled within that scan. */
+  typeSampleSize: 100,
+  /**
    * Versions retained per dashboard. Lives here rather than in the store
    * because the version-history UI needs it too, and that is client code which
    * cannot import from `$lib/server`.
