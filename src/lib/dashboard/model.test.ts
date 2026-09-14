@@ -18,6 +18,8 @@ import {
   newPanelId,
   nextPanelId,
   preflightVersion,
+  isInstanceRef,
+  isSafeObjectKey,
   serializeForSave,
   type Panel,
 } from './model';
@@ -50,11 +52,13 @@ describe('nextPanelId', () => {
     expect(nextPanelId([{ id: 'abc' }])).toBe('1');
   });
 
-  it('is deterministic — the same input always yields the same id', () => {
-    // #33 requires layout to survive save/reload byte-identically, which a
-    // random generator here would break.
-    const panels = [{ id: '1' }, { id: '2' }];
-    expect(nextPanelId(panels)).toBe(nextPanelId(panels));
+  it('depends only on the set of ids, not their order', () => {
+    // The previous version of this test compared f(x) to f(x), which is a
+    // tautology for any pure function and could only fail if someone swapped
+    // in the random generator. This asserts the property that matters for
+    // #33's byte-identical save/reload: same ids in, same answer out.
+    expect(nextPanelId([{ id: '3' }, { id: '1' }])).toBe(nextPanelId([{ id: '1' }, { id: '3' }]));
+    expect(nextPanelId([{ id: '1' }, { id: '3' }])).toBe('2');
   });
 });
 
@@ -276,5 +280,119 @@ describe('patterns', () => {
 
   it('GRID_COLUMNS is 24, matching Grafana so layouts port', () => {
     expect(GRID_COLUMNS).toBe(24);
+  });
+});
+
+
+// ===========================================================================
+// Regressions
+// ===========================================================================
+
+describe('regression: isSafeColor accepts real CSS and rejects invalid hex', () => {
+  it.each([['white'], ['black'], ['gray'], ['grey'], ['cyan'], ['magenta'], ['lime'], ['navy'], ['teal'], ['silver']])(
+    'accepts the CSS named color %s',
+    (c) => {
+      // Omitting these made an imported dashboard using `white` fail the entire
+      // save with no in-product fix — the pressure that turns a correct
+      // allowlist into a denylist six months later.
+      expect(isSafeColor(c)).toBe(true);
+    },
+  );
+
+  it.each([['RED'], ['Green'], ['SEMI-DARK-BLUE']])('is case-insensitive for %s', (c) => {
+    expect(isSafeColor(c)).toBe(true);
+  });
+
+  it.each([['hsl(120, 50%, 50%)'], ['hsla(120, 50%, 50%, 0.5)'], ['rgb(0 0 0 / 50%)'], ['rgb(1 2 3)']])(
+    'accepts the modern color form %s',
+    (c) => {
+      // rgb(0 0 0 / 50%) is what getComputedStyle returns and what most color
+      // pickers emit.
+      expect(isSafeColor(c)).toBe(true);
+    },
+  );
+
+  it.each([['#abcde'], ['#abcdef1'], ['#ab'], ['#abcdefabc']])(
+    'rejects the invalid hex length %s',
+    (c) => {
+      // 5 and 7 digits are not valid CSS: a browser drops the declaration and
+      // the element inherits, so the threshold would validate then render in
+      // the wrong color.
+      expect(isSafeColor(c)).toBe(false);
+    },
+  );
+
+  it.each([['#abc'], ['#abcd'], ['#aabbcc'], ['#aabbccdd']])('accepts the valid hex length %s', (c) => {
+    expect(isSafeColor(c)).toBe(true);
+  });
+});
+
+describe('regression: serializeForSave is iterative and __proto__-safe', () => {
+  it('does not stack-overflow on a deeply nested model', () => {
+    // A recursive sort would overflow on exactly the deep input the validator
+    // rejects iteratively — and this is exported for general use, so the
+    // Grafana import adapter will hand it unvalidated models.
+    const d = createDashboard({ title: 'T', instanceId: 'i' });
+    let deep: unknown = 1;
+    for (let i = 0; i < 20_000; i++) deep = { a: deep };
+    d.panels = [
+      {
+        ...createPanel({ type: 'stat', gridPos: { x: 0, y: 0, w: 4, h: 4 }, id: 'p' }),
+        options: { deep },
+      },
+    ];
+    expect(() => serializeForSave(d)).not.toThrow();
+  });
+
+  it('keeps a __proto__ key as data instead of silently dropping it', () => {
+    // Plain `out[key] = …` invokes the prototype setter: the key vanishes from
+    // the output and the intermediate object carries an attacker-chosen
+    // prototype, making the "canonical" form lossy.
+    const parsed = JSON.parse('{"z":1,"__proto__":{"pwned":2},"a":3}');
+    const json = serializeForSave({ ...createDashboard({ title: 'T', instanceId: 'i' }), tags: [] } as never);
+    expect(json).toBeTruthy();
+    const sorted = JSON.parse(serializeForSave(parsed as never));
+    expect(Object.keys(sorted)).toContain('__proto__');
+    expect(({} as Record<string, unknown>).pwned).toBeUndefined();
+  });
+});
+
+describe('regression: mergePanels', () => {
+  it('does not alias the incoming panels into the result', () => {
+    // Pushing incoming elements by reference means mutating a merged panel
+    // mutates the caller's array.
+    const incoming = [createPanel({ type: 'stat', gridPos: { x: 0, y: 0, w: 4, h: 4 }, id: 'x' })];
+    const out = mergePanels([], incoming);
+    expect(out[0].id).toBe('x');
+    expect(out).not.toBe(incoming);
+  });
+
+  it('assigns distinct ids when every incoming panel collides', () => {
+    const p = (id: string) => createPanel({ type: 'stat', gridPos: { x: 0, y: 0, w: 4, h: 4 }, id });
+    const out = mergePanels([p('1'), p('2'), p('3')], [p('1'), p('2'), p('3')]);
+    expect(new Set(out.map((x) => x.id)).size).toBe(6);
+  });
+});
+
+describe('regression: instance references', () => {
+  it('recognises a $variable reference', () => {
+    expect(isInstanceRef('$instance')).toBe(true);
+    expect(isInstanceRef('$my_var')).toBe(true);
+    expect(isInstanceRef('inst-abc')).toBe(false);
+    expect(isInstanceRef('$')).toBe(false);
+    expect(isInstanceRef('$1bad')).toBe(false);
+  });
+});
+
+describe('regression: reserved object keys', () => {
+  it('covers the keys a charset alone lets through', () => {
+    // `constructor` and `toString` are ordinary identifiers that pass any
+    // reasonable pattern, so the denylist is load-bearing, not belt-and-braces.
+    for (const key of ['__proto__', 'constructor', 'prototype', 'toString', 'valueOf']) {
+      expect(isSafeObjectKey(key)).toBe(false);
+    }
+    for (const key of ['panel-1', 'A', 'my_id']) {
+      expect(isSafeObjectKey(key)).toBe(true);
+    }
   });
 });

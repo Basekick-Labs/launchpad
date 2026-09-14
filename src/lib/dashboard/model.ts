@@ -51,8 +51,6 @@
  *    …). Variable names may not start with it.
  */
 
-import { v4 as uuidv4 } from 'uuid';
-
 /**
  * Version of THIS model. Deliberately not named `schemaVersion`: Grafana
  * dashboards carry their own `schemaVersion` (16–42 in the wild), and sharing
@@ -87,9 +85,20 @@ export const LIMITS = {
    * overflows before it can report the error.
    */
   maxDepth: 32,
+  /**
+   * Total nodes in the parsed document. THIS is the structural bound that
+   * actually binds, and it is enforced in the same walk as the depth check so
+   * it costs nothing extra.
+   *
+   * The per-field limits below are per-field sanity bounds, NOT a composable
+   * budget: 200 panels x 10 targets is already ~1.2MB with empty option bags,
+   * and 200 x 10 x maxSqlBytes is far past maxPayloadBytes. Whichever of the
+   * byte cap and this node cap binds first is the real ceiling.
+   */
+  maxNodes: 150_000,
   maxPanels: 200,
   maxTargetsPerPanel: 10,
-  maxSqlBytes: 50_000,
+  maxSqlBytes: 16_000,
   maxVariables: 50,
   maxTags: 20,
   maxTagLength: 50,
@@ -101,8 +110,19 @@ export const LIMITS = {
   maxOptionsBytes: 16_000,
   maxOptionsKeys: 100,
   maxOptionsDepth: 8,
-  /** Refresh floor, so a saved dashboard cannot hammer Arc. */
+  /**
+   * Refresh floor. Enforced by CLAMPING rather than rejecting, so an imported
+   * dashboard with an aggressive interval still opens.
+   *
+   * A shared dashboard at `refresh: '0ms'` makes every viewer's browser poll
+   * the instance proxy as fast as it can — and the proxy injects the admin
+   * token, so this is a privilege-amplified DoS launched from the lowest write
+   * privilege in the product.
+   */
   minRefreshMs: 5_000,
+  /** Upper bound on any duration, so interval arithmetic cannot overflow. */
+  maxDurationMs: 365 * 24 * 60 * 60 * 1000,
+  maxWarnings: 100,
   maxDataPoints: 100_000,
   /** Beyond this the grid allocates absurd numbers of implicit CSS rows. */
   maxGridY: 1000,
@@ -114,17 +134,65 @@ export const LIMITS = {
 export const UID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 export const PANEL_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 export const REF_ID_PATTERN = /^[A-Za-z0-9_-]{1,16}$/;
+
+/**
+ * A `$variable` reference, accepted anywhere an instance id is accepted.
+ *
+ * The `instance` variable type exists to template one dashboard across Arc
+ * instances, which means a panel must be able to say "whichever instance
+ * $instance currently selects". Half-accepting that — letting the literal
+ * string `$instance` through as if it were an id — makes every templated
+ * dashboard unsaveable, because storage resolves referenced ids against
+ * `WHERE id = ? AND org_id = ?` and `$instance` matches nothing.
+ *
+ * So it is accepted explicitly, excluded from {@link Dashboard} instance-id
+ * collection, and validated instead against the declared variables.
+ *
+ * SECURITY: the value a reference resolves to at runtime is still untrusted
+ * and MUST go through the org-scoped resolver. A reference is not an exemption
+ * from invariant 3 — it defers the check to execution time rather than
+ * removing it.
+ */
+export const INSTANCE_REF_PATTERN = /^\$[A-Za-z][A-Za-z0-9_]{0,63}$/;
+
+export function isInstanceRef(value: string): boolean {
+  return INSTANCE_REF_PATTERN.test(value);
+}
 /**
  * Variable names become object keys in the interpolation map and are spliced
  * into SQL as `$name`. The negative lookahead blocks `__proto__` and
  * `constructor`-style keys and reserves the macro namespace.
  */
 export const VARIABLE_NAME_PATTERN = /^(?!__)[A-Za-z][A-Za-z0-9_]{0,63}$/;
-export const RESERVED_VARIABLE_NAMES: ReadonlySet<string> = new Set([
+/**
+ * Keys that are dangerous as object properties. Panel ids, target refIds and
+ * variable names all become keys in lookup maps (`panelsById[panel.id]`,
+ * `resultsByRefId[t.refId]`), so all three need this — not just variable names.
+ *
+ * A charset alone is not enough: `constructor` and `toString` are ordinary
+ * identifiers that pass any reasonable pattern. Assigning to `__proto__` on a
+ * bare object replaces that object's prototype; assigning to `toString` shadows
+ * a method every consumer assumes exists.
+ */
+export const RESERVED_OBJECT_KEYS: ReadonlySet<string> = new Set([
   '__proto__',
   'constructor',
   'prototype',
+  'toString',
+  'valueOf',
+  'hasOwnProperty',
+  'isPrototypeOf',
+  'propertyIsEnumerable',
+  'toLocaleString',
 ]);
+
+/** True when `name` is safe to use as a key in a plain-object lookup map. */
+export function isSafeObjectKey(name: string): boolean {
+  return !RESERVED_OBJECT_KEYS.has(name);
+}
+
+/** @deprecated Use {@link RESERVED_OBJECT_KEYS}. Retained for one release. */
+export const RESERVED_VARIABLE_NAMES = RESERVED_OBJECT_KEYS;
 /** Database names are sent as the `x-arc-database` header and reach SQL. */
 export const DATABASE_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 /** `1m`, `30s`, `2h`. Also the grammar for refresh intervals. */
@@ -139,11 +207,42 @@ export const DURATION_PATTERN = /^\d+(ms|s|m|h|d|w)$/;
  * (`green`/`red` are its defaults). Kept verbatim for import fidelity.
  */
 export const NAMED_COLORS: ReadonlySet<string> = new Set([
-  'green', 'red', 'blue', 'orange', 'yellow', 'purple', 'text', 'panel-bg',
-  'transparent',
+  // Grafana's palette tokens, which appear in every real threshold config.
+  'text', 'panel-bg', 'transparent',
   ...['blue', 'green', 'red', 'orange', 'yellow', 'purple'].flatMap((h) => [
-    `dark-${h}`, `semi-dark-${h}`, `light-${h}`, `super-light-${h}`,
+    h, `dark-${h}`, `semi-dark-${h}`, `light-${h}`, `super-light-${h}`,
   ]),
+  // The CSS named colors. Omitting these made the allowlist reject `white`,
+  // `black`, `gray`, `cyan` and the rest, so an imported dashboard using any
+  // of them failed the entire save with no in-product fix. An allowlist that
+  // rejects ordinary input is the pressure that turns it into a denylist
+  // later, which is the mistake this is built to avoid.
+  'aliceblue', 'antiquewhite', 'aqua', 'aquamarine', 'azure', 'beige', 'bisque',
+  'black', 'blanchedalmond', 'blueviolet', 'brown', 'burlywood', 'cadetblue',
+  'chartreuse', 'chocolate', 'coral', 'cornflowerblue', 'cornsilk', 'crimson',
+  'cyan', 'darkblue', 'darkcyan', 'darkgoldenrod', 'darkgray', 'darkgreen',
+  'darkgrey', 'darkkhaki', 'darkmagenta', 'darkolivegreen', 'darkorange',
+  'darkorchid', 'darkred', 'darksalmon', 'darkseagreen', 'darkslateblue',
+  'darkslategray', 'darkslategrey', 'darkturquoise', 'darkviolet', 'deeppink',
+  'deepskyblue', 'dimgray', 'dimgrey', 'dodgerblue', 'firebrick', 'floralwhite',
+  'forestgreen', 'fuchsia', 'gainsboro', 'ghostwhite', 'gold', 'goldenrod',
+  'gray', 'greenyellow', 'grey', 'honeydew', 'hotpink', 'indianred', 'indigo',
+  'ivory', 'khaki', 'lavender', 'lavenderblush', 'lawngreen', 'lemonchiffon',
+  'lightblue', 'lightcoral', 'lightcyan', 'lightgoldenrodyellow', 'lightgray',
+  'lightgreen', 'lightgrey', 'lightpink', 'lightsalmon', 'lightseagreen',
+  'lightskyblue', 'lightslategray', 'lightslategrey', 'lightsteelblue',
+  'lightyellow', 'lime', 'limegreen', 'linen', 'magenta', 'maroon',
+  'mediumaquamarine', 'mediumblue', 'mediumorchid', 'mediumpurple',
+  'mediumseagreen', 'mediumslateblue', 'mediumspringgreen', 'mediumturquoise',
+  'mediumvioletred', 'midnightblue', 'mintcream', 'mistyrose', 'moccasin',
+  'navajowhite', 'navy', 'oldlace', 'olive', 'olivedrab', 'orangered', 'orchid',
+  'palegoldenrod', 'palegreen', 'paleturquoise', 'palevioletred', 'papayawhip',
+  'peachpuff', 'peru', 'pink', 'plum', 'powderblue', 'rebeccapurple',
+  'rosybrown', 'royalblue', 'saddlebrown', 'salmon', 'sandybrown', 'seagreen',
+  'seashell', 'sienna', 'silver', 'skyblue', 'slateblue', 'slategray',
+  'slategrey', 'snow', 'springgreen', 'steelblue', 'tan', 'teal', 'thistle',
+  'tomato', 'turquoise', 'violet', 'wheat', 'white', 'whitesmoke',
+  'yellowgreen',
 ]);
 
 /**
@@ -157,11 +256,26 @@ export const NAMED_COLORS: ReadonlySet<string> = new Set([
  * directive, which sets the property through CSSOM and rejects a value
  * containing `;`, rather than interpolating into a `style="..."` string.
  */
-const HEX_OR_FUNC = /^(#[0-9a-fA-F]{3,8}|rgba?\(\s*[\d.]+%?(\s*,\s*[\d.]+%?){2,3}\s*\))$/;
+// Hex lengths are enumerated, not a {3,8} range: #RGB, #RGBA, #RRGGBB and
+// #RRGGBBAA are valid CSS, while 5 and 7 digits are not — a browser drops the
+// whole declaration and the element silently inherits, so a threshold would
+// validate and then render in the wrong color.
+const HEX_COLOR = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+// Legacy comma form and the modern space/slash form, plus hsl(). The modern
+// form is what getComputedStyle returns and what most color pickers emit.
+const FUNC_COLOR =
+  /^(?:rgba?|hsla?)\((?:\s*[\d.]+(?:deg|%)?\s*(?:,\s*[\d.]+%?\s*){2,3}|\s*[\d.]+(?:deg|%)?(?:\s+[\d.]+%?){2}(?:\s*\/\s*[\d.]+%?)?\s*)\)$/i;
 
+/**
+ * The 32-character guard runs BEFORE the patterns, deliberately: `FUNC_COLOR`
+ * contains a quantified group, and keeping the length check adjacent is what
+ * makes its worst case irrelevant. Do not separate them.
+ */
 export function isSafeColor(value: unknown): value is string {
-  if (typeof value !== 'string' || value.length > 32) return false;
-  return HEX_OR_FUNC.test(value) || NAMED_COLORS.has(value);
+  if (typeof value !== 'string' || value.length === 0 || value.length > 32) return false;
+  // CSS color keywords are case-insensitive.
+  if (NAMED_COLORS.has(value.toLowerCase())) return true;
+  return HEX_COLOR.test(value) || FUNC_COLOR.test(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +383,11 @@ export const FIELD_COLOR_MODES = [
 ] as const;
 export type FieldColorMode = (typeof FIELD_COLOR_MODES)[number];
 
-/** Every mode except 'fixed', as a runtime list the validator can enum over. */
+/**
+ * Every mode except 'fixed', as a runtime list the validator can enum over.
+ * Pinned to {@link FIELD_COLOR_MODES} below, so adding a mode there without
+ * adding it here is a compile error rather than a silently-rejected value.
+ */
 export const NON_FIXED_COLOR_MODES = [
   'palette-classic-by-name',
   'palette-classic',
@@ -278,12 +396,45 @@ export const NON_FIXED_COLOR_MODES = [
 ] as const;
 export type NonFixedColorMode = (typeof NON_FIXED_COLOR_MODES)[number];
 
+type _NonFixedModesComplete = Exclude<FieldColorMode, 'fixed'> extends NonFixedColorMode
+  ? NonFixedColorMode extends Exclude<FieldColorMode, 'fixed'>
+    ? true
+    : never
+  : never;
+const _nonFixedModesComplete: _NonFixedModesComplete = true;
+
+/**
+ * Distributed over each non-fixed mode rather than written as a single
+ * `{ mode: NonFixedColorMode }` member, so the shape matches the discriminated
+ * union the validator uses — which is what lets a `{mode:'fixed'}` missing its
+ * color report the missing FIELD instead of an unactionable "Invalid input" on
+ * the whole object.
+ */
 export type FieldColor =
   | { mode: 'fixed'; fixedColor: string }
-  | { mode: NonFixedColorMode; scheme?: string };
+  | { [M in NonFixedColorMode]: { mode: M; scheme?: string } }[NonFixedColorMode];
 
-export const MAPPING_TYPES = ['value', 'range', 'regex', 'special'] as const;
+/**
+ * `regex` is deliberately NOT in v1, alongside `TemplateVariable.regex`.
+ *
+ * A user-supplied pattern runs against every result value, and dashboards are
+ * shared — so catastrophic backtracking is a denial of service against
+ * colleagues, and against the whole control plane if it is ever evaluated
+ * server-side (better-sqlite3 is synchronous, so a pegged event loop takes
+ * SQLite with it). No source-level heuristic can prevent this: `\s*\s*$` is
+ * seven characters with no nested quantifier and blocks for ~12s on a 4KB
+ * value; `^(a|a)+$` is exponential. Denylisting patterns is the same mistake
+ * {@link isSafeColor} correctly refuses to make for CSS.
+ *
+ * It returns with #38 behind a linear-time engine (RE2) or a grammar
+ * restricted to a provably-linear subset.
+ */
+export const MAPPING_TYPES = ['value', 'range', 'special'] as const;
 export type MappingType = (typeof MAPPING_TYPES)[number];
+
+const MAPPING_TYPE_SET: ReadonlySet<string> = new Set(MAPPING_TYPES);
+export const isMappingType = (v: unknown): v is MappingType =>
+  typeof v === 'string' && MAPPING_TYPE_SET.has(v);
 
 export const SPECIAL_MATCHES = ['null', 'nan', 'empty', 'true', 'false'] as const;
 export type SpecialMatch = (typeof SPECIAL_MATCHES)[number];
@@ -302,7 +453,6 @@ export interface MappingResult {
 export type ValueMapping =
   | { type: 'value'; value: string; result: MappingResult }
   | { type: 'range'; from: number | null; to: number | null; result: MappingResult }
-  | { type: 'regex'; pattern: string; result: MappingResult }
   | { type: 'special'; match: SpecialMatch; result: MappingResult };
 
 export interface FieldConfig {
@@ -339,39 +489,43 @@ export interface FieldConfigSource {
 // ---------------------------------------------------------------------------
 
 /**
- * Panels declare their own option shapes by augmenting this interface, which
- * keeps `Panel<'stat'>` fully typed inside the stat renderer without coupling
- * this module to seven unwritten panels:
+ * Reads a panel's options with its type's defaults applied, doing the cast in
+ * ONE place instead of at every use site across seven panel implementations.
  *
  * ```ts
- * declare module '$lib/dashboard/model' {
- *   interface PanelOptionsRegistry { stat: StatOptions }
- * }
+ * const opts = panelOptions<StatOptions>(panel, STAT_DEFAULTS);
  * ```
+ *
+ * SECURITY: spread, never a recursive merge — see invariant 2. A deep merge
+ * walks attacker-controlled keys and pollutes `Object.prototype`.
+ *
+ * (An earlier draft used a `PanelOptionsRegistry` interface plus a generic
+ * `Panel<T>`. It was removed: narrowing on `panel.type` does not narrow
+ * `panel.options` when iterating a `Panel[]`, so renderers still needed an
+ * unchecked cast — and augmenting the registry widened `Panel['options']` to a
+ * union, which broke the schema pins in `validate.ts` and would have failed
+ * the build on the first panel PR.)
  */
-// eslint-disable-next-line @typescript-eslint/no-empty-interface
-export interface PanelOptionsRegistry {}
+export function panelOptions<T extends object>(panel: Panel, defaults: T): T {
+  return { ...defaults, ...(panel.options as Partial<T>) };
+}
 
-export type OptionsFor<T extends PanelType> = T extends keyof PanelOptionsRegistry
-  ? PanelOptionsRegistry[T]
-  : Record<string, unknown>;
-
-export interface Panel<T extends PanelType = PanelType> {
+export interface Panel {
   /**
    * Unique within the dashboard, and STABLE across saves — it appears in URLs
    * (`?viewPanel=`, `?editPanel=`), so renumbering on save breaks every
    * bookmarked panel link.
    */
   id: string;
-  type: T;
+  type: PanelType;
   /** May be empty; untitled panels are normal. */
   title: string;
   description?: string;
   gridPos: GridPos;
   targets: Target[];
   fieldConfig: FieldConfigSource;
-  /** Validated by the panel, not here. See {@link PanelOptionsRegistry}. */
-  options: OptionsFor<T>;
+  /** Validated by the panel, not here. Read via {@link panelOptions}. */
+  options: Record<string, unknown>;
   /** Overrides the dashboard's instance. Untrusted — see invariant 3. */
   instanceId?: string;
   /** Draws without the card background and border. */
@@ -468,8 +622,6 @@ export interface TemplateVariable {
   allValue?: string;
   /** Defaults to 'on-dashboard-load' for query variables. */
   refresh?: VariableRefresh;
-  /** Filters/captures part of each result value. Capped — see the validator. */
-  regex?: string;
   sort?: VariableSort;
   /**
    * Which instance a 'query' variable runs against. Without this, a dashboard
@@ -598,9 +750,24 @@ export interface ValidationError {
   message: string;
 }
 
-/** A non-fatal loss: something was accepted, but not exactly as supplied. */
+export type WarningCode =
+  | 'reordered'
+  | 'clamped'
+  | 'renamed'
+  | 'dropped'
+  | 'defaulted'
+  | 'truncated';
+
+/**
+ * A non-fatal loss: something was accepted, but not exactly as supplied.
+ *
+ * Carries a `code` for the same reason {@link ValidationError} does — warnings
+ * are rendered in the same import dialog, and without one a consumer has to
+ * match on English that will be reworded.
+ */
 export interface ValidationWarning {
   path: string;
+  code: WarningCode;
   message: string;
 }
 
@@ -610,18 +777,32 @@ export type DashboardValidationResult =
       model: Dashboard;
       warnings: ValidationWarning[];
       /**
-       * Every distinct instance id referenced anywhere in the document —
-       * dashboard, panel and target levels. Returned so a caller cannot check
-       * "the" instance id and miss the overrides; this module performs no
-       * database access itself.
+       * Every distinct LITERAL instance id referenced anywhere in the document
+       * — dashboard, panel, target and variable levels. Returned so a caller
+       * cannot authorize "the" instance id and miss the overrides; this module
+       * performs no database access itself.
+       *
+       * A sorted array rather than a Set: this crosses an API boundary, and
+       * `JSON.stringify` turns a Set into `{}` — a security control that
+       * silently serializes to empty is a trap.
+       *
+       * `$variable` references are NOT included, because they name a variable
+       * rather than an instance. Whatever they resolve to at runtime is still
+       * untrusted and must go through the org-scoped resolver.
        */
-      referencedInstanceIds: Set<string>;
+      referencedInstanceIds: string[];
     }
   | {
       ok: false;
       errors: ValidationError[];
       /** True when the error list hit {@link LIMITS.maxErrors}. */
       truncated: boolean;
+    };
+
+/** Result of collecting warnings, exposed so consumers can detect truncation. */
+export type WarningList = {
+  warnings: ValidationWarning[];
+  truncated: boolean;
     };
 
 // ---------------------------------------------------------------------------
@@ -633,21 +814,23 @@ export type DashboardValidationResult =
  * a cookie-selected active org made `/d/[uid]` resolve to different dashboards
  * for different viewers as soon as two orgs both created "Production Overview".
  */
+function randomId(length: number): string {
+  // crypto.randomUUID is available in Node 18+ and every browser we target,
+  // so an isomorphic module does not need the `uuid` dependency for this.
+  return globalThis.crypto.randomUUID().replace(/-/g, '').slice(0, length);
+}
+
 export function newDashboardUid(): string {
-  return uuidv4().replace(/-/g, '').slice(0, 22);
+  return randomId(22);
 }
 
 export function newPanelId(): string {
-  return uuidv4().replace(/-/g, '').slice(0, 12);
+  return randomId(12);
 }
 
 /** Lowest unused positive integer id, for deterministic assignment on import. */
 export function nextPanelId(panels: ReadonlyArray<{ id: string }>): string {
-  const used = new Set(panels.map((p) => p.id));
-  for (let i = 1; ; i++) {
-    const candidate = String(i);
-    if (!used.has(candidate)) return candidate;
-  }
+  return firstFreeId(new Set(panels.map((p) => p.id)));
 }
 
 /**
@@ -659,11 +842,25 @@ export function nextPanelId(panels: ReadonlyArray<{ id: string }>): string {
  */
 export function mergePanels(existing: Panel[], incoming: Panel[]): Panel[] {
   const out = [...existing];
+  // One set, maintained as we go — `out.some()` per panel plus a rebuilt set
+  // per collision made this quadratic.
+  const used = new Set(out.map((p) => p.id));
   for (const panel of incoming) {
-    const collides = out.some((p) => p.id === panel.id);
-    out.push(collides ? { ...panel, id: nextPanelId(out) } : panel);
+    let next = panel;
+    if (used.has(panel.id)) {
+      next = { ...panel, id: firstFreeId(used) };
+    }
+    used.add(next.id);
+    out.push(next);
   }
   return out;
+}
+
+function firstFreeId(used: ReadonlySet<string>): string {
+  for (let i = 1; ; i++) {
+    const candidate = String(i);
+    if (!used.has(candidate)) return candidate;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -731,14 +928,68 @@ export function serializeForSave(model: Dashboard): string {
   return JSON.stringify(sortKeys(model));
 }
 
+/**
+ * Sorts object keys at every level, without recursion.
+ *
+ * Recursion here would stack-overflow on exactly the deep input the validator
+ * goes to trouble to reject iteratively — and `serializeForSave` is exported
+ * for general use, so it can be handed an unvalidated model (the Grafana
+ * import adapter will do precisely that).
+ *
+ * Keys are assigned with `defineProperty` rather than `out[key] = …`, because
+ * plain assignment to `__proto__` invokes the prototype setter: the key would
+ * vanish from the output and the intermediate object would carry an
+ * attacker-chosen prototype, making this "canonical" form lossy.
+ */
 function sortKeys(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortKeys);
   if (value === null || typeof value !== 'object') return value;
-  const out: Record<string, unknown> = {};
-  for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-    out[key] = sortKeys((value as Record<string, unknown>)[key]);
+
+  type Frame = { src: unknown; dst: unknown; keys: string[]; i: number };
+  const rootDst: unknown = Array.isArray(value) ? [] : {};
+  const stack: Frame[] = [
+    { src: value, dst: rootDst, keys: Array.isArray(value) ? [] : Object.keys(value).sort(), i: 0 },
+  ];
+
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1];
+    const srcIsArray = Array.isArray(frame.src);
+    const length = srcIsArray ? (frame.src as unknown[]).length : frame.keys.length;
+
+    if (frame.i >= length) {
+      stack.pop();
+      continue;
+    }
+
+    const key = srcIsArray ? frame.i : frame.keys[frame.i];
+    const child = srcIsArray
+      ? (frame.src as unknown[])[frame.i]
+      : (frame.src as Record<string, unknown>)[frame.keys[frame.i]];
+    frame.i++;
+
+    let outChild: unknown = child;
+    if (child !== null && typeof child === 'object') {
+      outChild = Array.isArray(child) ? [] : {};
+      stack.push({
+        src: child,
+        dst: outChild,
+        keys: Array.isArray(child) ? [] : Object.keys(child).sort(),
+        i: 0,
+      });
+    }
+
+    if (srcIsArray) {
+      (frame.dst as unknown[])[key as number] = outChild;
+    } else {
+      Object.defineProperty(frame.dst as object, key as string, {
+        value: outChild,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    }
   }
-  return out;
+
+  return rootDst;
 }
 
 // ---------------------------------------------------------------------------

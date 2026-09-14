@@ -1,7 +1,7 @@
 /**
  * Dashboard validation — the trust boundary for dashboard documents.
  *
- * ## This module is isomorphic, and that is deliberate
+ * ## This module is isomorphic, and that has a cost worth knowing
  *
  * It runs on the server (authoritative, on every write) and in the browser
  * (the import dialog previews errors before uploading anything). The client
@@ -9,18 +9,24 @@
  * it stores, and nothing may assume a document is safe because the browser said
  * so. It therefore imports no node builtins and lives outside `$lib/server/`.
  *
+ * **zod is ~145KB raw / 35KB gzipped, against a largest app chunk of ~62KB.**
+ * Any page that imports this eagerly more than doubles the biggest bundle in
+ * the app. Client-side callers MUST load it with a dynamic `import()` from
+ * inside the component that needs it (the import dialog), so it never lands on
+ * an entry chunk. Server-side callers can import it normally.
+ *
  * ## Why zod
  *
  * The rules here must stay in step with the interfaces in `./model`, and a
  * hand-rolled validator drifts silently in exactly the direction we hit most
  * often: TypeScript says nothing when a new optional field has no reader, so
  * the field is declared, documented, set by the editor — and deleted on every
- * save. The `Eq<z.infer<...>, T>` assertions at the bottom of this file turn
- * that into a compile error in either direction.
+ * save. The `Eq<z.infer<...>, T>` assertions at the bottom turn that into a
+ * compile error in either direction.
  *
- * Unknown keys are stripped rather than rejected (zod's default for
- * `z.object`), so a document from a slightly different build loses what we do
- * not understand instead of failing wholesale.
+ * They pin the SHAPE, not the RULES: relaxing `.regex(...)` to a bare
+ * `z.string()` still type-checks. Shape drift is what the pins catch; rule
+ * drift is what the tests are for.
  *
  * ## What this module does NOT do
  *
@@ -30,9 +36,11 @@
  * - **It does not sanitise SQL.** A panel query is arbitrary SQL by design.
  *   Only shape and size are enforced.
  * - **It does not understand foreign documents.** Converting a Grafana
- *   dashboard belongs to the import adapter; letting that leak in here would
- *   make this lossy and heuristic, which is the opposite of what a trust
- *   boundary should be.
+ *   dashboard belongs to the import adapter (#57).
+ * - **It cannot be cancelled.** Both entry points are fully synchronous, so
+ *   they cannot honour `event.request.signal`; a client that disconnects
+ *   mid-save still pays the full walk. Bounding the input is the only lever,
+ *   which is why the node budget below is not optional.
  */
 
 import { z } from 'zod';
@@ -45,17 +53,19 @@ import {
   PANEL_ID_PATTERN,
   PANEL_TYPES,
   REF_ID_PATTERN,
-  RESERVED_VARIABLE_NAMES,
   SPECIAL_MATCHES,
   TARGET_FORMATS,
   THRESHOLDS_MODES,
+  UID_PATTERN,
   VARIABLE_HIDE,
   VARIABLE_NAME_PATTERN,
   VARIABLE_REFRESH,
   VARIABLE_SORT,
   VARIABLE_TYPES,
   WEEK_STARTS,
+  isInstanceRef,
   isSafeColor,
+  isSafeObjectKey,
   migrateModel,
   preflightVersion,
   type Dashboard,
@@ -70,41 +80,200 @@ import {
   type ValidationError,
   type ValidationWarning,
   type ValueMapping,
+  type WarningCode,
 } from './model';
+
+// ---------------------------------------------------------------------------
+// Structural walk — depth and size in one pass
+// ---------------------------------------------------------------------------
+
+export interface WalkResult {
+  depth: number;
+  nodes: number;
+  /** Set when a cap was exceeded; the walk stops early rather than finishing. */
+  exceeded: 'depth' | 'nodes' | null;
+}
+
+/**
+ * Measures nesting depth and node count in a single ITERATIVE pass.
+ *
+ * Iterative is not a style preference. A recursive implementation would
+ * overflow on exactly the input this exists to reject, reporting a crash
+ * instead of a validation error.
+ *
+ * Nodes and depths go in two parallel arrays rather than an array of
+ * `{node, depth}` wrappers — allocating one object per node cost ~31MB of heap
+ * on a 3.5MB document versus ~14.6MB this way, for the same answer.
+ *
+ * Caveat: this sees only enumerable own properties, and is TOCTOU against
+ * getters. Unreachable via `parseAndValidate` (JSON has neither); reachable
+ * only if a caller hands `validateDashboard` a live object or a Proxy.
+ */
+export function walkStructure(value: unknown, maxDepth: number, maxNodes: number): WalkResult {
+  let deepest = 0;
+  let nodes = 0;
+  const stackNodes: unknown[] = [value];
+  const stackDepths: number[] = [0];
+
+  while (stackNodes.length > 0) {
+    const node = stackNodes.pop();
+    const depth = stackDepths.pop()!;
+
+    nodes++;
+    if (nodes > maxNodes) return { depth: deepest, nodes, exceeded: 'nodes' };
+    if (depth > deepest) deepest = depth;
+    if (deepest > maxDepth) return { depth: deepest, nodes, exceeded: 'depth' };
+
+    if (node === null || typeof node !== 'object') continue;
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        stackNodes.push(child);
+        stackDepths.push(depth + 1);
+      }
+    } else {
+      for (const key of Object.keys(node as Record<string, unknown>)) {
+        stackNodes.push((node as Record<string, unknown>)[key]);
+        stackDepths.push(depth + 1);
+      }
+    }
+  }
+  return { depth: deepest, nodes, exceeded: null };
+}
+
+/** Convenience wrapper for callers that only care about depth. */
+export function maxDepthOf(value: unknown, maxDepth = LIMITS.maxDepth): number {
+  return walkStructure(value, maxDepth, Number.MAX_SAFE_INTEGER).depth;
+}
+
+/** UTF-8 byte length without allocating an encoded copy of the string. */
+export function utf8Length(str: string): number {
+  let bytes = 0;
+  for (let i = 0; i < str.length; i++) {
+    const code = str.charCodeAt(i);
+    if (code < 0x80) bytes += 1;
+    else if (code < 0x800) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff) {
+      bytes += 4; // surrogate pair: consume both units
+      i++;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
+export function durationToMs(value: string): number | null {
+  const match = /^(\d+)(ms|s|m|h|d|w)$/.exec(value);
+  if (!match) return null;
+  const n = Number(match[1]);
+  if (!Number.isFinite(n)) return null;
+  const unit: Record<string, number> = {
+    ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000,
+  };
+  return n * unit[match[2]];
+}
 
 // ---------------------------------------------------------------------------
 // Primitives
 // ---------------------------------------------------------------------------
 
-/** Rejects NaN and Infinity, which survive neither JSON nor SQLite meaningfully. */
-const finiteNumber = () => z.number().refine(Number.isFinite, { message: 'must be finite' });
+/**
+ * zod issue codes are too coarse for consumers to branch on, and every
+ * `.refine()` collapses to `custom`. Each refine therefore carries the code it
+ * actually means, read back out in `codeFor`.
+ */
+function withCode(code: ValidationCode, message: string) {
+  return { message, params: { code } };
+}
 
-const colorString = z.string().refine(isSafeColor, { message: 'not an allowed color' });
+const colorString = z
+  .string()
+  .refine(isSafeColor, withCode('invalid_format', 'not an allowed color'));
 
-const duration = z.string().regex(DURATION_PATTERN);
+/** Durations feed interval arithmetic, so they are bounded at both ends. */
+const duration = z
+  .string()
+  .max(32)
+  .regex(DURATION_PATTERN)
+  .refine((d) => {
+    const ms = durationToMs(d);
+    return ms !== null && ms <= LIMITS.maxDurationMs;
+  }, withCode('out_of_range', 'duration is out of range'));
 
 const boundedText = (max: number) => z.string().max(max);
 
-/**
- * A free-form bag (panel options, fieldConfig.custom). Bounded on three axes:
- * key count, serialized size, and nesting depth. Depth is the one that matters
- * most — see LIMITS.maxDepth.
- */
-const optionsBag = z
-  .record(z.string(), z.unknown())
-  .refine((v) => Object.keys(v).length <= LIMITS.maxOptionsKeys, {
-    message: `must have at most ${LIMITS.maxOptionsKeys} keys`,
-  })
-  .refine((v) => safeByteLength(v) <= LIMITS.maxOptionsBytes, {
-    message: `must serialize to at most ${LIMITS.maxOptionsBytes} bytes`,
-  })
-  .refine((v) => maxDepthOf(v) <= LIMITS.maxOptionsDepth, {
-    message: `must nest at most ${LIMITS.maxOptionsDepth} levels deep`,
-  });
+/** An instance id, or a `$variable` naming one. Both are untrusted. */
+const instanceRef = z
+  .string()
+  .min(1)
+  .max(64)
+  .refine(
+    (v) => UID_PATTERN.test(v) || isInstanceRef(v),
+    withCode('invalid_format', 'must be an instance id or a $variable reference'),
+  );
 
-function safeByteLength(value: unknown): number {
+/** Identifiers that become object keys need more than a charset. */
+const objectKey = (pattern: RegExp, max: number) =>
+  z
+    .string()
+    .max(max)
+    .regex(pattern)
+    .refine(isSafeObjectKey, withCode('unknown_value', 'is a reserved name'));
+
+const boundedSql = z
+  .string()
+  .refine(
+    (s) => utf8Length(s) <= LIMITS.maxSqlBytes,
+    withCode('too_long', `must be at most ${LIMITS.maxSqlBytes} bytes`),
+  );
+
+/**
+ * A free-form bag (panel options, `fieldConfig.custom`), bounded on keys, depth
+ * and bytes in ONE walk.
+ *
+ * Previously three chained `.refine()` calls, each traversing independently.
+ * zod does not short-circuit a refine chain, so a bag failing the first check
+ * still paid for all three — about 48% of total validation time.
+ */
+const optionsBag = z.record(z.string(), z.unknown()).superRefine((value, ctx) => {
+  if (Object.keys(value).length > LIMITS.maxOptionsKeys) {
+    ctx.addIssue({
+      code: 'custom',
+      message: `must have at most ${LIMITS.maxOptionsKeys} keys`,
+      params: { code: 'too_many' },
+    });
+    return;
+  }
+  const walk = walkStructure(value, LIMITS.maxOptionsDepth, LIMITS.maxNodes);
+  if (walk.exceeded === 'depth') {
+    ctx.addIssue({
+      code: 'custom',
+      message: `must nest at most ${LIMITS.maxOptionsDepth} levels deep`,
+      params: { code: 'too_deep' },
+    });
+    return;
+  }
+  if (walk.exceeded === 'nodes') {
+    ctx.addIssue({ code: 'custom', message: 'has too many values', params: { code: 'too_many' } });
+    return;
+  }
+  // Size last: it is the only check that materializes a copy, so it runs only
+  // once the cheap structural checks have passed.
+  if (approximateBytes(value) > LIMITS.maxOptionsBytes) {
+    ctx.addIssue({
+      code: 'custom',
+      message: `must serialize to at most ${LIMITS.maxOptionsBytes} bytes`,
+      params: { code: 'too_large' },
+    });
+  }
+});
+
+function approximateBytes(value: unknown): number {
   try {
-    return new TextEncoder().encode(JSON.stringify(value) ?? '').length;
+    const json = JSON.stringify(value);
+    if (json === undefined) return Number.POSITIVE_INFINITY;
+    // UTF-16 code units are a lower bound on UTF-8 bytes, so this decides
+    // without a second pass whenever the string alone is already over.
+    if (json.length > LIMITS.maxOptionsBytes) return json.length;
+    return utf8Length(json);
   } catch {
     return Number.POSITIVE_INFINITY; // circular or otherwise unserializable
   }
@@ -122,17 +291,17 @@ const GridPosSchema = z.object({
 });
 
 const TargetSchema = z.object({
-  refId: z.string().regex(REF_ID_PATTERN),
+  refId: objectKey(REF_ID_PATTERN, 16),
   // Empty is legal — createPanel produces it, and it means "not configured".
-  sql: z.string().max(LIMITS.maxSqlBytes),
-  instanceId: z.string().min(1).max(64).optional(),
+  sql: boundedSql,
+  instanceId: instanceRef.optional(),
   database: z.string().regex(DATABASE_PATTERN).optional(),
   format: z.enum(TARGET_FORMATS).optional(),
   hide: z.boolean().optional(),
 });
 
 const ThresholdSchema = z.object({
-  value: finiteNumber().nullable(),
+  value: z.number().nullable(),
   color: colorString,
 });
 
@@ -141,12 +310,14 @@ const ThresholdsConfigSchema = z.object({
   steps: z.array(ThresholdSchema).max(LIMITS.maxThresholdSteps),
 });
 
-const FieldColorSchema = z.union([
+// Discriminated, so a `{mode:'fixed'}` missing its color reports the missing
+// field rather than an unactionable "Invalid input" on the whole object.
+const FieldColorSchema = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('fixed'), fixedColor: colorString }),
-  z.object({
-    mode: z.enum(NON_FIXED_COLOR_MODES),
-    scheme: z.string().max(64).optional(),
-  }),
+  z.object({ mode: z.literal(NON_FIXED_COLOR_MODES[0]), scheme: z.string().max(64).optional() }),
+  z.object({ mode: z.literal(NON_FIXED_COLOR_MODES[1]), scheme: z.string().max(64).optional() }),
+  z.object({ mode: z.literal(NON_FIXED_COLOR_MODES[2]), scheme: z.string().max(64).optional() }),
+  z.object({ mode: z.literal(NON_FIXED_COLOR_MODES[3]), scheme: z.string().max(64).optional() }),
 ]);
 
 const MappingResultSchema = z.object({
@@ -158,20 +329,23 @@ const ValueMappingSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('value'), value: boundedText(200), result: MappingResultSchema }),
   z.object({
     type: z.literal('range'),
-    from: finiteNumber().nullable(),
-    to: finiteNumber().nullable(),
+    from: z.number().nullable(),
+    to: z.number().nullable(),
     result: MappingResultSchema,
   }),
-  z.object({ type: z.literal('regex'), pattern: safeRegexSource(), result: MappingResultSchema }),
-  z.object({ type: z.literal('special'), match: z.enum(SPECIAL_MATCHES), result: MappingResultSchema }),
+  z.object({
+    type: z.literal('special'),
+    match: z.enum(SPECIAL_MATCHES),
+    result: MappingResultSchema,
+  }),
 ]);
 
 const FieldConfigSchema = z.object({
   unit: boundedText(32).optional(),
   // toFixed throws a RangeError outside 0..100 and blanks the whole panel.
   decimals: z.number().int().min(0).max(20).optional(),
-  min: finiteNumber().optional(),
-  max: finiteNumber().optional(),
+  min: z.number().optional(),
+  max: z.number().optional(),
   displayName: boundedText(200).optional(),
   noValue: boundedText(200).optional(),
   color: FieldColorSchema.optional(),
@@ -183,7 +357,7 @@ const FieldConfigSchema = z.object({
 const FieldConfigSourceSchema = z.object({ defaults: FieldConfigSchema });
 
 const PanelSchema = z.object({
-  id: z.string().regex(PANEL_ID_PATTERN),
+  id: objectKey(PANEL_ID_PATTERN, 64),
   type: z.enum(PANEL_TYPES),
   title: boundedText(LIMITS.maxTitleLength),
   description: boundedText(LIMITS.maxDescriptionLength).optional(),
@@ -191,7 +365,7 @@ const PanelSchema = z.object({
   targets: z.array(TargetSchema).max(LIMITS.maxTargetsPerPanel),
   fieldConfig: FieldConfigSourceSchema,
   options: optionsBag,
-  instanceId: z.string().min(1).max(64).optional(),
+  instanceId: instanceRef.optional(),
   transparent: z.boolean().optional(),
   interval: duration.optional(),
   maxDataPoints: z.number().int().min(1).max(LIMITS.maxDataPoints).optional(),
@@ -206,24 +380,20 @@ const VariableOptionSchema = z.object({
 });
 
 const TemplateVariableSchema = z.object({
-  name: z
-    .string()
-    .regex(VARIABLE_NAME_PATTERN)
-    .refine((n) => !RESERVED_VARIABLE_NAMES.has(n), { message: 'is a reserved name' }),
+  name: objectKey(VARIABLE_NAME_PATTERN, 64),
   type: z.enum(VARIABLE_TYPES),
   label: boundedText(200).optional(),
   description: boundedText(LIMITS.maxDescriptionLength).optional(),
   hide: z.enum(VARIABLE_HIDE).optional(),
   // For a query variable this IS SQL, executed on dashboard load.
-  query: z.string().max(LIMITS.maxSqlBytes).optional(),
+  query: boundedSql.optional(),
   current: z.array(VariableOptionSchema).max(1000).optional(),
   multi: z.boolean().optional(),
   includeAll: z.boolean().optional(),
   allValue: boundedText(500).optional(),
   refresh: z.enum(VARIABLE_REFRESH).optional(),
-  regex: safeRegexSource().optional(),
   sort: z.enum(VARIABLE_SORT).optional(),
-  instanceId: z.string().min(1).max(64).optional(),
+  instanceId: instanceRef.optional(),
   auto: z.boolean().optional(),
   autoCount: z.number().int().min(1).max(10_000).optional(),
   autoMin: duration.optional(),
@@ -232,20 +402,32 @@ const TemplateVariableSchema = z.object({
 const TimeSettingsSchema = z.object({
   from: boundedText(64),
   to: boundedText(64),
-  timezone: z.string().max(64).refine(isValidTimezone, { message: 'not a known timezone' }),
-  refresh: z.string().refine((r) => r === '' || DURATION_PATTERN.test(r), {
-    message: 'must be empty or a duration',
-  }),
+  timezone: z
+    .string()
+    .max(64)
+    .refine(isValidTimezone, withCode('unknown_value', 'not a known timezone')),
+  refresh: z
+    .string()
+    .max(32)
+    .refine(
+      (r) => r === '' || DURATION_PATTERN.test(r),
+      withCode('invalid_format', 'must be empty or a duration'),
+    ),
   nowDelay: duration.optional(),
   weekStart: z.enum(WEEK_STARTS).optional(),
 });
 
 const DashboardSchema = z.object({
   launchpadSchemaVersion: z.number().int().min(0),
-  title: z.string().min(1).max(LIMITS.maxTitleLength),
+  title: z
+    .string()
+    .max(LIMITS.maxTitleLength)
+    // Trimmed before the emptiness check: a whitespace-only title is an
+    // invisible row in the dashboard list.
+    .refine((t) => t.trim().length > 0, withCode('required', 'must not be empty')),
   description: boundedText(LIMITS.maxDescriptionLength).optional(),
   tags: z.array(boundedText(LIMITS.maxTagLength)).max(LIMITS.maxTags),
-  instanceId: z.string().min(1).max(64).nullable(),
+  instanceId: instanceRef.nullable(),
   time: TimeSettingsSchema,
   variables: z.array(TemplateVariableSchema).max(LIMITS.maxVariables),
   panels: z.array(PanelSchema).max(LIMITS.maxPanels),
@@ -254,87 +436,47 @@ const DashboardSchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
-// Guards used by the schemas
+// Timezones
 // ---------------------------------------------------------------------------
 
-/**
- * Author-supplied regexes run against every result value, and dashboards are
- * shared — so catastrophic backtracking is a denial of service against
- * colleagues, not just the author. Rejects nested quantifiers structurally and
- * requires the pattern to actually compile.
- */
-function safeRegexSource() {
-  const NESTED_QUANTIFIER = /(\+|\*|\{\d+,?\d*\})\s*\)?\s*(\+|\*|\{)/;
-  return z
-    .string()
-    .max(200)
-    .refine((src) => !NESTED_QUANTIFIER.test(src), { message: 'has nested quantifiers' })
-    .refine((src) => {
-      try {
-        new RegExp(src);
-        return true;
-      } catch {
-        return false;
-      }
-    }, { message: 'is not a valid regular expression' });
-}
-
-const TIMEZONE_SET: ReadonlySet<string> = (() => {
-  const base = new Set(['utc', 'UTC', 'browser']);
+const CANONICAL_ZONES: ReadonlySet<string> = (() => {
+  const set = new Set<string>(['utc', 'UTC', 'browser']);
   try {
-    // Cheaper than a try/catch per validation, and avoids using exceptions for
-    // control flow. Node 20 ships full-icu, so this is populated.
-    for (const zone of (Intl as unknown as { supportedValuesOf?(k: string): string[] })
-      .supportedValuesOf?.('timeZone') ?? []) {
-      base.add(zone);
-    }
+    const supported = (Intl as unknown as { supportedValuesOf?(k: string): string[] })
+      .supportedValuesOf?.('timeZone');
+    for (const zone of supported ?? []) set.add(zone);
   } catch {
-    /* fall through to the small base set */
+    /* fall through to the Intl probe below */
   }
-  return base;
+  return set;
 })();
 
-function isValidTimezone(tz: string): boolean {
-  if (TIMEZONE_SET.has(tz)) return true;
-  if (TIMEZONE_SET.size > 3) return false; // the full list loaded; tz is genuinely unknown
-  try {
-    new Intl.DateTimeFormat(undefined, { timeZone: tz });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Depth
-// ---------------------------------------------------------------------------
+const probedZones = new Map<string, boolean>();
 
 /**
- * Maximum nesting depth, computed with an EXPLICIT STACK.
+ * `Intl.supportedValuesOf` returns CANONICAL zones only — 418 of them — and
+ * deliberately excludes link names. Treating that list as exhaustive rejected
+ * `US/Eastern`, `GMT`, `Etc/GMT+5`, `Japan` and every case variant, all of
+ * which `Intl.DateTimeFormat` accepts and which appear throughout older
+ * Grafana exports.
  *
- * A recursive implementation would overflow on exactly the input this exists to
- * reject, reporting a crash instead of a validation error. Cheap to get right,
- * impossible to notice when wrong.
+ * So the set is a CACHE, not a control: a miss always falls through to the real
+ * check. A cache must never be authoritative for a miss.
  */
-export function maxDepthOf(value: unknown): number {
-  let deepest = 0;
-  const stack: Array<{ node: unknown; depth: number }> = [{ node: value, depth: 0 }];
-  while (stack.length > 0) {
-    const { node, depth } = stack.pop()!;
-    if (depth > deepest) deepest = depth;
-    // Bail early: we only ever compare against a cap, and a hostile document
-    // should not cost us a full traversal.
-    if (deepest > LIMITS.maxDepth) return deepest;
-    if (node === null || typeof node !== 'object') continue;
-    if (Array.isArray(node)) {
-      for (const child of node) stack.push({ node: child, depth: depth + 1 });
-    } else {
-      for (const key of Object.keys(node as Record<string, unknown>)) {
-        stack.push({ node: (node as Record<string, unknown>)[key], depth: depth + 1 });
-      }
-    }
+function isValidTimezone(tz: string): boolean {
+  if (CANONICAL_ZONES.has(tz)) return true;
+  const cached = probedZones.get(tz);
+  if (cached !== undefined) return cached;
+  let valid = false;
+  try {
+    // Locale stays undefined — never attacker-influenced.
+    new Intl.DateTimeFormat(undefined, { timeZone: tz });
+    valid = true;
+  } catch {
+    valid = false;
   }
-  return deepest;
+  probedZones.set(tz, valid);
+  return valid;
 }
 
 // ---------------------------------------------------------------------------
@@ -343,27 +485,40 @@ export function maxDepthOf(value: unknown): number {
 
 /** `['panels', 2, 'gridPos', 'w']` -> `panels[2].gridPos.w` */
 function formatPath(path: ReadonlyArray<PropertyKey>): string {
-  let out = '';
+  const parts: string[] = [];
   for (const segment of path) {
-    if (typeof segment === 'number') out += `[${segment}]`;
-    else out += out === '' ? String(segment) : `.${String(segment)}`;
+    if (typeof segment === 'number') parts.push(`[${segment}]`);
+    else parts.push(parts.length === 0 ? String(segment) : `.${String(segment)}`);
   }
-  return out;
+  return parts.join('');
 }
 
 function codeFor(issue: z.core.$ZodIssue): ValidationCode {
+  // Every .refine() in this file collapses to `custom` and carries the code it
+  // actually means. Without this, "too many option keys" and "malformed refId"
+  // were indistinguishable to a consumer branching on `code`.
+  const carried = (issue as { params?: { code?: ValidationCode } }).params?.code;
+  if (carried) return carried;
+
   switch (issue.code) {
     case 'invalid_type':
-      return 'wrong_type';
+      return issue.input === undefined ? 'required' : 'wrong_type';
     case 'too_big':
-      return typeof issue.origin === 'string' && issue.origin === 'string' ? 'too_long' : 'too_many';
+      return issue.origin === 'string' ? 'too_long' : 'too_many';
     case 'too_small':
+      return issue.origin === 'string' ? 'required' : 'out_of_range';
+    case 'not_multiple_of':
       return 'out_of_range';
     case 'invalid_format':
       return 'invalid_format';
+    case 'unrecognized_keys':
+    case 'invalid_key':
+    case 'invalid_element':
     case 'invalid_value':
     case 'invalid_union':
       return 'unknown_value';
+    case 'custom':
+      return 'invalid_format';
     default:
       return 'invalid_format';
   }
@@ -372,7 +527,7 @@ function codeFor(issue: z.core.$ZodIssue): ValidationCode {
 /**
  * Messages deliberately never echo the offending VALUE — an error like
  * `Invalid color: "<img src=x>"` round-trips attacker-controlled text into an
- * admin's import dialog. The path and the rule are enough.
+ * admin's import dialog, a toast, and the server log.
  */
 function toErrors(issues: ReadonlyArray<z.core.$ZodIssue>): {
   errors: ValidationError[];
@@ -381,17 +536,27 @@ function toErrors(issues: ReadonlyArray<z.core.$ZodIssue>): {
   const errors: ValidationError[] = [];
   for (const issue of issues) {
     if (errors.length >= LIMITS.maxErrors) return { errors, truncated: true };
-    errors.push({
-      path: formatPath(issue.path),
-      code: codeFor(issue),
-      message: issue.message,
-    });
+    errors.push({ path: formatPath(issue.path), code: codeFor(issue), message: issue.message });
   }
   return { errors, truncated: false };
 }
 
 function fail(error: ValidationError): DashboardValidationResult {
   return { ok: false, errors: [error], truncated: false };
+}
+
+/** Bounded warning sink — the success path needs the same cap as the failure path. */
+class Warnings {
+  readonly items: ValidationWarning[] = [];
+  truncated = false;
+
+  add(path: string, code: WarningCode, message: string): void {
+    if (this.items.length >= LIMITS.maxWarnings) {
+      this.truncated = true;
+      return;
+    }
+    this.items.push({ path, code, message });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -401,8 +566,10 @@ function fail(error: ValidationError): DashboardValidationResult {
 /**
  * Validate an already-parsed value.
  *
- * Callers holding the raw request body should prefer {@link parseAndValidate},
- * which enforces the byte cap before parsing.
+ * This enforces its own structural budget rather than trusting the caller:
+ * every route in this repo uses `request.json()`, so leaving the bound to the
+ * caller meant the idiomatic path had none at all. A 44MB hostile input blocked
+ * the event loop for 484ms before this existed.
  */
 export function validateDashboard(input: unknown): DashboardValidationResult {
   const pre = preflightVersion(input);
@@ -410,12 +577,19 @@ export function validateDashboard(input: unknown): DashboardValidationResult {
 
   // Before anything walks the document — including zod, and including the
   // serializer SvelteKit will later run over it.
-  const depth = maxDepthOf(input);
-  if (depth > LIMITS.maxDepth) {
+  const walk = walkStructure(input, LIMITS.maxDepth, LIMITS.maxNodes);
+  if (walk.exceeded === 'depth') {
     return fail({
       path: '',
       code: 'too_deep',
       message: `Dashboard nests more than ${LIMITS.maxDepth} levels deep`,
+    });
+  }
+  if (walk.exceeded === 'nodes') {
+    return fail({
+      path: '',
+      code: 'too_large',
+      message: `Dashboard contains more than ${LIMITS.maxNodes} values`,
     });
   }
 
@@ -426,28 +600,23 @@ export function validateDashboard(input: unknown): DashboardValidationResult {
     return { ok: false, errors, truncated };
   }
 
-  const warnings: ValidationWarning[] = [];
+  const warnings = new Warnings();
   const model = normalize(parsed.data as Dashboard, warnings);
-  return {
-    ok: true,
-    model,
-    warnings,
-    referencedInstanceIds: collectInstanceIds(model),
-  };
+  const referencedInstanceIds = collectInstanceIds(model, warnings);
+  return { ok: true, model, warnings: warnings.items, referencedInstanceIds };
 }
 
 /**
- * Validate a raw JSON string.
+ * Validate a raw JSON string, enforcing the byte cap before parsing.
  *
- * The byte cap here is a backstop, not the control: by the time a string
- * reaches this function the whole body is already in memory. The ROUTE must
- * bound the request first — read `request.text()` (not `.json()`, which leaves
- * no string to measure) and reject on `Buffer.byteLength` before calling this.
+ * Prefer this whenever the raw body is available — the byte check is cheaper
+ * and more precise than the node budget, and it rejects before `JSON.parse`
+ * materializes anything.
  */
 export function parseAndValidate(json: string): DashboardValidationResult {
-  // Bytes, not `.length` — the latter counts UTF-16 code units and undercounts
-  // non-ASCII by up to 4x.
-  if (new TextEncoder().encode(json).length > LIMITS.maxPayloadBytes) {
+  // UTF-16 code units are a lower bound on UTF-8 bytes, so an over-cap string
+  // is rejected without scanning it at all.
+  if (json.length > LIMITS.maxPayloadBytes || utf8Length(json) > LIMITS.maxPayloadBytes) {
     return fail({
       path: '',
       code: 'too_large',
@@ -457,52 +626,41 @@ export function parseAndValidate(json: string): DashboardValidationResult {
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
-  } catch (err) {
-    return fail({
-      path: '',
-      code: 'malformed_json',
-      message: err instanceof Error ? err.message : 'Invalid JSON',
-    });
+  } catch {
+    // V8 splices ~15 bytes of the raw body verbatim into its SyntaxError
+    // message, so forwarding it would echo attacker bytes into the import
+    // dialog and the server log — the one thing toErrors is careful not to do.
+    return fail({ path: '', code: 'malformed_json', message: 'Invalid JSON' });
   }
   return validateDashboard(parsed);
-}
-
-/**
- * Strip the fields a client must never supply.
- *
- * `uid` and `version` are storage's, not the document's. Accepting them from an
- * import makes it an overwrite primitive (a matching uid silently replaces an
- * existing dashboard) and lets an importer poison optimistic concurrency by
- * claiming whatever version it likes.
- */
-export function stripServerOwnedFields(input: unknown): unknown {
-  if (input === null || typeof input !== 'object' || Array.isArray(input)) return input;
-  const { uid: _uid, version: _version, ...rest } = input as Record<string, unknown>;
-  return rest;
 }
 
 // ---------------------------------------------------------------------------
 // Normalization
 // ---------------------------------------------------------------------------
 
-function normalize(model: Dashboard, warnings: ValidationWarning[]): Dashboard {
+function normalize(model: Dashboard, warnings: Warnings): Dashboard {
   const panels = model.panels.map((panel, i) => normalizePanel(panel, `panels[${i}]`, warnings));
 
-  const seenPanelIds = new Set<string>();
+  // Seeded with EVERY id, not just those seen so far: probing upward from a
+  // partially-filled set hands out ids belonging to panels LATER in the array,
+  // which then cascade-renumber. Panel ids appear in ?viewPanel= URLs, so that
+  // silently broke bookmarks for panels that were never duplicates.
+  const allIds = new Set(panels.map((p) => p.id));
+  const assigned = new Set<string>();
   for (let i = 0; i < panels.length; i++) {
     const panel = panels[i];
-    if (seenPanelIds.has(panel.id)) {
-      // Renumber rather than reject: a duplicate id is recoverable, and
-      // rejecting the document would lose work the user cannot get back.
-      let next = 1;
-      while (seenPanelIds.has(String(next))) next++;
-      warnings.push({
-        path: `panels[${i}].id`,
-        message: `Duplicate panel id reassigned to "${next}"`,
-      });
-      panels[i] = { ...panel, id: String(next) };
+    if (!assigned.has(panel.id)) {
+      assigned.add(panel.id);
+      continue;
     }
-    seenPanelIds.add(panels[i].id);
+    let next = 1;
+    while (allIds.has(String(next)) || assigned.has(String(next))) next++;
+    const id = String(next);
+    warnings.add(`panels[${i}].id`, 'renamed', 'Duplicate panel id was reassigned');
+    panels[i] = { ...panel, id };
+    allIds.add(id);
+    assigned.add(id);
   }
 
   const seenVarNames = new Set<string>();
@@ -510,10 +668,7 @@ function normalize(model: Dashboard, warnings: ValidationWarning[]): Dashboard {
   for (let i = 0; i < model.variables.length; i++) {
     const variable = model.variables[i];
     if (seenVarNames.has(variable.name)) {
-      warnings.push({
-        path: `variables[${i}]`,
-        message: 'Duplicate variable name dropped',
-      });
+      warnings.add(`variables[${i}]`, 'dropped', 'Duplicate variable name dropped');
       continue;
     }
     seenVarNames.add(variable.name);
@@ -524,17 +679,33 @@ function normalize(model: Dashboard, warnings: ValidationWarning[]): Dashboard {
     );
   }
 
-  return { ...model, panels, variables };
+  const time = normalizeTime(model.time, warnings);
+  return { ...model, panels, variables, time };
 }
 
-function normalizePanel(panel: Panel, path: string, warnings: ValidationWarning[]): Panel {
+function normalizeTime(time: TimeSettings, warnings: Warnings): TimeSettings {
+  if (time.refresh === '') return time;
+  const ms = durationToMs(time.refresh);
+  if (ms !== null && ms < LIMITS.minRefreshMs) {
+    // Clamp rather than reject, so an imported dashboard still opens.
+    warnings.add(
+      'time.refresh',
+      'clamped',
+      `Refresh interval raised to the ${LIMITS.minRefreshMs}ms minimum`,
+    );
+    return { ...time, refresh: `${LIMITS.minRefreshMs / 1000}s` };
+  }
+  return time;
+}
+
+function normalizePanel(panel: Panel, path: string, warnings: Warnings): Panel {
   let next = panel;
 
   // Clamp rather than reject — an off-grid panel is a layout nuisance, not a
   // reason to refuse the document.
   if (panel.gridPos.x + panel.gridPos.w > GRID_COLUMNS) {
     const w = Math.max(1, GRID_COLUMNS - panel.gridPos.x);
-    warnings.push({ path: `${path}.gridPos`, message: `Panel extends past the grid; width clamped to ${w}` });
+    warnings.add(`${path}.gridPos`, 'clamped', 'Panel extended past the grid and was narrowed');
     next = { ...next, gridPos: { ...next.gridPos, w } };
   }
 
@@ -543,7 +714,7 @@ function normalizePanel(panel: Panel, path: string, warnings: ValidationWarning[
   for (let i = 0; i < next.targets.length; i++) {
     const target = next.targets[i];
     if (seenRefIds.has(target.refId)) {
-      warnings.push({ path: `${path}.targets[${i}]`, message: 'Duplicate refId dropped' });
+      warnings.add(`${path}.targets[${i}]`, 'dropped', 'Duplicate refId dropped');
       continue;
     }
     seenRefIds.add(target.refId);
@@ -553,54 +724,98 @@ function normalizePanel(panel: Panel, path: string, warnings: ValidationWarning[
 
   const thresholds = next.fieldConfig.defaults.thresholds;
   if (thresholds) {
-    // Sort rather than reject: the renderer requires base-first-then-ascending,
-    // and nothing upstream guarantees it.
-    const steps = [...thresholds.steps].sort((a, b) => {
-      if (a.value === null) return -1;
-      if (b.value === null) return 1;
-      return a.value - b.value;
-    });
+    const steps = [...thresholds.steps].sort(compareThresholds);
+    // Reference identity is a valid movement check: the copy shares references
+    // and Array.prototype.sort is stable.
     const wasSorted = steps.every((s, i) => s === thresholds.steps[i]);
     if (!wasSorted) {
-      warnings.push({ path: `${path}.fieldConfig.defaults.thresholds`, message: 'Threshold steps reordered' });
+      warnings.add(
+        `${path}.fieldConfig.defaults.thresholds`,
+        'reordered',
+        'Threshold steps were reordered',
+      );
+      // Rebuild only when something moved, and spread the existing fieldConfig
+      // so siblings added later (overrides, in #36) are not dropped.
+      next = {
+        ...next,
+        fieldConfig: {
+          ...next.fieldConfig,
+          defaults: { ...next.fieldConfig.defaults, thresholds: { ...thresholds, steps } },
+        },
+      };
     }
-    next = {
-      ...next,
-      fieldConfig: { defaults: { ...next.fieldConfig.defaults, thresholds: { ...thresholds, steps } } },
-    };
   }
 
   const { min, max } = next.fieldConfig.defaults;
   if (min !== undefined && max !== undefined && min > max) {
-    warnings.push({ path: `${path}.fieldConfig.defaults`, message: 'min exceeded max; both cleared' });
+    warnings.add(`${path}.fieldConfig.defaults`, 'dropped', 'min exceeded max; both were cleared');
     const defaults: FieldConfig = { ...next.fieldConfig.defaults };
     delete defaults.min;
     delete defaults.max;
-    next = { ...next, fieldConfig: { defaults } };
+    next = { ...next, fieldConfig: { ...next.fieldConfig, defaults } };
   }
 
   return next;
 }
 
 /**
- * Every distinct instance id in the document, at all three levels. Returned so
- * a caller cannot authorize the dashboard-level id and miss the panel and
- * target overrides — the levels that have no UI yet, and therefore no test and
- * no reviewer intuition.
+ * Base (null) step first, then ascending.
+ *
+ * Returning -1 for both orderings when two steps are null — as an earlier
+ * version did — is a non-antisymmetric comparator, which V8's sort answers by
+ * swapping the pair on every pass. Validation then stopped being idempotent:
+ * which color served as the base step flipped on every save, dirty tracking
+ * fired on every open, and a new version accumulated per save with no user edit.
  */
-function collectInstanceIds(model: Dashboard): Set<string> {
+function compareThresholds(a: { value: number | null }, b: { value: number | null }): number {
+  if (a.value === null && b.value === null) return 0;
+  if (a.value === null) return -1;
+  if (b.value === null) return 1;
+  return a.value - b.value;
+}
+
+/**
+ * Every distinct LITERAL instance id in the document, at all four levels.
+ *
+ * `$variable` references are excluded and validated instead: they must name a
+ * declared variable of type `instance`. Emitting them as ids made every
+ * templated dashboard unsaveable — storage resolves ids against
+ * `WHERE id = ? AND org_id = ?`, which `$instance` never matches — while the id
+ * that actually gets resolved never reached the authorizer at all.
+ */
+function collectInstanceIds(model: Dashboard, warnings: Warnings): string[] {
+  const instanceVars = new Set(
+    model.variables.filter((v) => v.type === 'instance').map((v) => `$${v.name}`),
+  );
   const ids = new Set<string>();
-  if (model.instanceId) ids.add(model.instanceId);
-  for (const panel of model.panels) {
-    if (panel.instanceId) ids.add(panel.instanceId);
-    for (const target of panel.targets) {
-      if (target.instanceId) ids.add(target.instanceId);
+
+  const consider = (value: string | null | undefined, path: string): void => {
+    if (!value) return;
+    if (isInstanceRef(value)) {
+      if (!instanceVars.has(value)) {
+        warnings.add(
+          path,
+          'dropped',
+          'References a variable that is not a declared instance variable',
+        );
+      }
+      return;
+    }
+    ids.add(value);
+  };
+
+  consider(model.instanceId, 'instanceId');
+  for (let p = 0; p < model.panels.length; p++) {
+    const panel = model.panels[p];
+    consider(panel.instanceId, `panels[${p}].instanceId`);
+    for (let t = 0; t < panel.targets.length; t++) {
+      consider(panel.targets[t].instanceId, `panels[${p}].targets[${t}].instanceId`);
     }
   }
-  for (const variable of model.variables) {
-    if (variable.instanceId) ids.add(variable.instanceId);
+  for (let v = 0; v < model.variables.length; v++) {
+    consider(model.variables[v].instanceId, `variables[${v}].instanceId`);
   }
-  return ids;
+  return [...ids].sort();
 }
 
 // ---------------------------------------------------------------------------
@@ -608,20 +823,33 @@ function collectInstanceIds(model: Dashboard): Set<string> {
 // ---------------------------------------------------------------------------
 
 /**
- * These assertions are the whole reason zod is here rather than a hand-rolled
- * validator. If someone adds a field to an interface in `./model` and forgets
+ * These assertions are the reason zod is here rather than a hand-rolled
+ * validator: if someone adds a field to an interface in `./model` and forgets
  * the schema — or tightens a schema past what the type allows — `npm run check`
  * fails here instead of the field being silently dropped on every save.
+ *
+ * The `_Hint` parameter exists so the failure names the type that drifted;
+ * without it the error is a bare "Type 'false' does not satisfy the constraint
+ * 'true'" that cascades to every enclosing pin at once.
  */
 type Eq<A, B> =
   (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
-type Assert<T extends true> = T;
+type Assert<T extends true, _Hint extends string> = T;
 
-type _GridPosPinned = Assert<Eq<z.infer<typeof GridPosSchema>, GridPos>>;
-type _TargetPinned = Assert<Eq<z.infer<typeof TargetSchema>, Target>>;
-type _ValueMappingPinned = Assert<Eq<z.infer<typeof ValueMappingSchema>, ValueMapping>>;
-type _FieldConfigPinned = Assert<Eq<z.infer<typeof FieldConfigSchema>, FieldConfig>>;
-type _TimeSettingsPinned = Assert<Eq<z.infer<typeof TimeSettingsSchema>, TimeSettings>>;
-type _PanelPinned = Assert<Eq<z.infer<typeof PanelSchema>, Panel>>;
-type _VariablePinned = Assert<Eq<z.infer<typeof TemplateVariableSchema>, TemplateVariable>>;
-type _DashboardPinned = Assert<Eq<z.infer<typeof DashboardSchema>, Dashboard>>;
+type _GridPosPinned = Assert<Eq<z.infer<typeof GridPosSchema>, GridPos>, 'GridPos'>;
+type _TargetPinned = Assert<Eq<z.infer<typeof TargetSchema>, Target>, 'Target'>;
+type _ValueMappingPinned = Assert<
+  Eq<z.infer<typeof ValueMappingSchema>, ValueMapping>,
+  'ValueMapping'
+>;
+type _FieldConfigPinned = Assert<Eq<z.infer<typeof FieldConfigSchema>, FieldConfig>, 'FieldConfig'>;
+type _TimeSettingsPinned = Assert<
+  Eq<z.infer<typeof TimeSettingsSchema>, TimeSettings>,
+  'TimeSettings'
+>;
+type _PanelPinned = Assert<Eq<z.infer<typeof PanelSchema>, Panel>, 'Panel'>;
+type _VariablePinned = Assert<
+  Eq<z.infer<typeof TemplateVariableSchema>, TemplateVariable>,
+  'TemplateVariable'
+>;
+type _DashboardPinned = Assert<Eq<z.infer<typeof DashboardSchema>, Dashboard>, 'Dashboard'>;

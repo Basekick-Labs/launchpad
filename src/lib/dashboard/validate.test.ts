@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 import {
   validateDashboard,
   parseAndValidate,
-  stripServerOwnedFields,
   maxDepthOf,
 } from './validate';
 import {
@@ -173,15 +172,14 @@ describe('payload size', () => {
 });
 
 describe('server-owned fields', () => {
-  it('strips uid and version so import cannot overwrite or poison concurrency', () => {
-    const stripped = stripServerOwnedFields({ ...minimal(), uid: 'victim', version: 99 });
-    expect(stripped).not.toHaveProperty('uid');
-    expect(stripped).not.toHaveProperty('version');
-  });
-
-  it('leaves a non-object untouched', () => {
-    expect(stripServerOwnedFields('x')).toBe('x');
-    expect(stripServerOwnedFields(null)).toBe(null);
+  it('drops uid and version, so an import cannot overwrite or poison concurrency', () => {
+    // z.object strips unknown keys, so these cannot survive into the model.
+    // An explicit stripServerOwnedFields() helper was removed as dead weight:
+    // it duplicated a guarantee the schema already makes, and a belt nobody
+    // fastens is a trap rather than defence in depth.
+    const result = expectOk(validateDashboard({ ...minimal(), uid: 'victim', version: 99 }));
+    expect(result.model).not.toHaveProperty('uid');
+    expect(result.model).not.toHaveProperty('version');
   });
 });
 
@@ -313,23 +311,30 @@ describe('colors', () => {
   });
 });
 
-describe('regex fields', () => {
-  it('rejects a nested-quantifier pattern that would hang every viewer', () => {
-    const model = minimal();
-    model.variables = [{ name: 'v', type: 'query', query: 'SELECT 1', regex: '(a+)+$' }];
-    expectErr(validateDashboard(JSON.parse(JSON.stringify(model))));
+describe('user-supplied regexes are not accepted in v1', () => {
+  // A source-level heuristic cannot prevent catastrophic backtracking:
+  // `\\s*\\s*$` is 7 characters with no nested quantifier and blocks for ~12s
+  // on a 4KB value. Dashboards are shared, so that is a DoS against colleagues
+  // — and against the whole control plane if evaluated server-side, since
+  // better-sqlite3 is synchronous. Deferred to #38 behind RE2.
+  it('drops a variable regex rather than storing a pattern it cannot bound', () => {
+    const model = minimal() as unknown as Record<string, unknown>;
+    model.variables = [{ name: 'v', type: 'query', query: 'SELECT 1', regex: '\\s*\\s*$' }];
+    const result = expectOk(validateDashboard(model));
+    expect(result.model.variables[0]).not.toHaveProperty('regex');
   });
 
-  it('rejects a pattern that does not compile', () => {
-    const model = minimal();
-    model.variables = [{ name: 'v', type: 'query', query: 'SELECT 1', regex: '([' }];
-    expectErr(validateDashboard(JSON.parse(JSON.stringify(model))));
-  });
-
-  it('accepts an ordinary pattern', () => {
-    const model = minimal();
-    model.variables = [{ name: 'v', type: 'query', query: 'SELECT 1', regex: '^web-\\d+$' }];
-    expectOk(validateDashboard(JSON.parse(JSON.stringify(model))));
+  it('rejects a regex value mapping', () => {
+    const model = minimal() as unknown as Record<string, unknown>;
+    model.panels = [
+      {
+        ...createPanel({ type: 'stat', gridPos: { x: 0, y: 0, w: 4, h: 4 }, id: 'p' }),
+        fieldConfig: {
+          defaults: { mappings: [{ type: 'regex', pattern: '(a|a)+$', result: { text: 'x' } }] },
+        },
+      },
+    ];
+    expectErr(validateDashboard(model));
   });
 });
 
@@ -489,5 +494,288 @@ describe('referencedInstanceIds', () => {
     // save, but the shape is legal so the file can be re-imported at all.
     const model = { ...minimal(), instanceId: null };
     expectOk(validateDashboard(model));
+  });
+});
+
+
+// ===========================================================================
+// Regressions — every test below fails against the pre-review implementation
+// ===========================================================================
+
+describe('regression: threshold ordering is a total order', () => {
+  function withSteps(steps: Array<{ value: number | null; color: string }>) {
+    const model = minimal() as unknown as Record<string, unknown>;
+    model.panels = [
+      {
+        ...createPanel({ type: 'stat', gridPos: { x: 0, y: 0, w: 4, h: 4 }, id: 'p' }),
+        fieldConfig: { defaults: { thresholds: { mode: 'absolute', steps } } },
+      },
+    ];
+    return model;
+  }
+
+  // Returning -1 for both cmp(a,b) and cmp(b,a) made V8 swap the pair on every
+  // pass, so WHICH color served as the base step flipped on every save.
+  it('does not reorder two base steps back and forth across repeated saves', () => {
+    const input = withSteps([
+      { value: null, color: 'red' },
+      { value: null, color: 'green' },
+      { value: 5, color: 'blue' },
+    ]);
+    const colorsAfter = (doc: unknown) =>
+      expectOk(validateDashboard(doc)).model.panels[0].fieldConfig.defaults.thresholds!.steps.map(
+        (s) => s.color,
+      );
+
+    const first = colorsAfter(structuredClone(input));
+    const second = colorsAfter(structuredClone(input));
+    const third = colorsAfter(structuredClone(input));
+    expect(second).toEqual(first);
+    expect(third).toEqual(first);
+    expect(first).toEqual(['red', 'green', 'blue']);
+  });
+
+  it('emits no warning on a second pass over an already-normalized document', () => {
+    // Normalization that does not reach a fixed point is not normalization: it
+    // makes dirty-tracking fire on every open and adds a version per save.
+    const once = expectOk(
+      validateDashboard(
+        withSteps([
+          { value: null, color: 'red' },
+          { value: null, color: 'green' },
+        ]),
+      ),
+    );
+    const twice = expectOk(validateDashboard(structuredClone(once.model)));
+    expect(twice.warnings).toEqual([]);
+    expect(twice.model).toEqual(once.model);
+  });
+});
+
+describe('regression: duplicate panel ids do not cascade', () => {
+  it('leaves the ids of non-duplicate panels untouched', () => {
+    // Probing upward from a partially-filled set handed out ids belonging to
+    // panels later in the array, renaming panels that were never duplicates
+    // and breaking their ?viewPanel= bookmarks.
+    const model = minimal() as unknown as Record<string, unknown>;
+    const base = (id: string, title: string) => ({
+      ...createPanel({ type: 'stat', gridPos: { x: 0, y: 0, w: 4, h: 4 }, id }),
+      title,
+    });
+    model.panels = [
+      base('1', 'first'),
+      base('1', 'duplicate'),
+      base('2', 'innocent'),
+      base('3', 'also-innocent'),
+    ];
+
+    const result = expectOk(validateDashboard(model));
+    const byTitle = Object.fromEntries(result.model.panels.map((p) => [p.title, p.id]));
+
+    expect(byTitle.first).toBe('1');
+    expect(byTitle.innocent).toBe('2');
+    expect(byTitle['also-innocent']).toBe('3');
+    expect(byTitle.duplicate).not.toBe('1');
+    expect(new Set(Object.values(byTitle)).size).toBe(4);
+    expect(result.warnings.filter((w) => w.code === 'renamed')).toHaveLength(1);
+  });
+});
+
+describe('regression: instance variable references', () => {
+  it('excludes a $variable reference from the literal id set', () => {
+    // Emitting the literal '$instance' as an id made every templated dashboard
+    // unsaveable: storage resolves ids with WHERE id = ?, which never matches.
+    const model = minimal();
+    model.variables = [
+      { name: 'instance', type: 'instance', current: [{ text: 'a', value: 'inst-a' }] },
+    ];
+    model.panels = [
+      {
+        ...createPanel({ type: 'stat', gridPos: { x: 0, y: 0, w: 4, h: 4 }, id: 'p' }),
+        instanceId: '$instance',
+      },
+    ];
+    const result = expectOk(validateDashboard(JSON.parse(JSON.stringify(model))));
+    expect(result.referencedInstanceIds).toEqual(['inst-1']);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('warns when a reference names no declared instance variable', () => {
+    const model = minimal();
+    model.panels = [
+      {
+        ...createPanel({ type: 'stat', gridPos: { x: 0, y: 0, w: 4, h: 4 }, id: 'p' }),
+        instanceId: '$nope',
+      },
+    ];
+    const result = expectOk(validateDashboard(JSON.parse(JSON.stringify(model))));
+    expect(result.warnings.map((w) => w.path)).toContain('panels[0].instanceId');
+  });
+
+  it('returns a plain array, because a Set JSON.stringifies to an empty object', () => {
+    const result = expectOk(validateDashboard(fullyPopulatedDashboard()));
+    expect(Array.isArray(result.referencedInstanceIds)).toBe(true);
+    const roundTripped = JSON.parse(JSON.stringify({ ids: result.referencedInstanceIds }));
+    expect(roundTripped.ids.length).toBeGreaterThan(0);
+  });
+});
+
+describe('regression: identifiers that become object keys', () => {
+  it.each([['__proto__'], ['constructor'], ['toString'], ['hasOwnProperty']])(
+    'rejects panel id %j',
+    (id) => {
+      const model = minimal() as unknown as Record<string, unknown>;
+      model.panels = [createPanel({ type: 'stat', gridPos: { x: 0, y: 0, w: 4, h: 4 }, id })];
+      expect(expectErr(validateDashboard(model)).errors[0].path).toBe('panels[0].id');
+    },
+  );
+
+  it.each([['__proto__'], ['constructor'], ['toString']])('rejects refId %j', (refId) => {
+    const model = minimal() as unknown as Record<string, unknown>;
+    model.panels = [
+      {
+        ...createPanel({ type: 'stat', gridPos: { x: 0, y: 0, w: 4, h: 4 }, id: 'p' }),
+        targets: [{ refId, sql: 'SELECT 1' }],
+      },
+    ];
+    expect(expectErr(validateDashboard(model)).errors[0].path).toBe('panels[0].targets[0].refId');
+  });
+});
+
+describe('regression: instanceId is charset-validated', () => {
+  const CR_LF = String.fromCharCode(13, 10);
+  const NUL = String.fromCharCode(0);
+  it.each([
+    ['../../../etc/passwd'],
+    ['a' + CR_LF + 'X-Injected: 1'],
+    ['a' + NUL + 'b'],
+    ['http://evil.example'],
+    ["' OR 1=1 --"],
+    ['..'],
+  ])('rejects %j', (instanceId) => {
+    const result = expectErr(validateDashboard({ ...minimal(), instanceId }));
+    expect(result.errors[0].path).toBe('instanceId');
+  });
+});
+
+describe('regression: refresh floor is enforced', () => {
+  it.each([['0ms'], ['1ms'], ['1s'], ['4s']])('clamps %s up to the minimum', (refresh) => {
+    // A shared dashboard at 0ms makes every viewer's browser poll the proxy as
+    // fast as it can — and the proxy injects the admin token.
+    const model = minimal();
+    model.time = { ...model.time, refresh };
+    const result = expectOk(validateDashboard(JSON.parse(JSON.stringify(model))));
+    expect(result.model.time.refresh).toBe('5s');
+    expect(result.warnings.some((w) => w.code === 'clamped')).toBe(true);
+  });
+
+  it('leaves an acceptable interval alone', () => {
+    const model = minimal();
+    model.time = { ...model.time, refresh: '30s' };
+    const result = expectOk(validateDashboard(JSON.parse(JSON.stringify(model))));
+    expect(result.model.time.refresh).toBe('30s');
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('rejects a duration far past any sane bound', () => {
+    const model = minimal() as unknown as Record<string, unknown>;
+    (model.time as Record<string, unknown>).nowDelay = '999999999999d';
+    expectErr(validateDashboard(model));
+  });
+});
+
+describe('regression: timezone link names are accepted', () => {
+  it.each([['US/Eastern'], ['GMT'], ['Etc/GMT+5'], ['Japan'], ['Zulu']])(
+    'accepts the IANA link name %s',
+    (timezone) => {
+      // Intl.supportedValuesOf returns canonical zones only, so treating it as
+      // exhaustive rejected names Intl itself accepts and that appear
+      // throughout older Grafana exports.
+      const model = minimal();
+      model.time = { ...model.time, timezone };
+      expectOk(validateDashboard(JSON.parse(JSON.stringify(model))));
+    },
+  );
+
+  it('still rejects a zone that is not real', () => {
+    const model = minimal();
+    model.time = { ...model.time, timezone: 'Mars/Olympus' };
+    expectErr(validateDashboard(JSON.parse(JSON.stringify(model))));
+  });
+});
+
+describe('regression: the structural budget applies to validateDashboard too', () => {
+  it('rejects a document with too many nodes', () => {
+    // Every route in this repo uses request.json(), so the idiomatic path had
+    // no bound at all: a 44MB input blocked the event loop for 484ms.
+    const model = minimal() as unknown as Record<string, unknown>;
+    const huge = Array.from({ length: LIMITS.maxNodes + 10 }, (_, i) => i);
+    model.panels = [
+      {
+        ...createPanel({ type: 'stat', gridPos: { x: 0, y: 0, w: 4, h: 4 }, id: 'p' }),
+        options: { huge },
+      },
+    ];
+    expect(expectErr(validateDashboard(model)).errors[0].code).toBe('too_large');
+  });
+});
+
+describe('regression: error and warning codes are usable', () => {
+  it('reports a refine failure with its real code, not a generic one', () => {
+    const model = minimal() as unknown as Record<string, unknown>;
+    const options: Record<string, number> = {};
+    for (let i = 0; i < LIMITS.maxOptionsKeys + 1; i++) options[`k${i}`] = i;
+    model.panels = [
+      { ...createPanel({ type: 'stat', gridPos: { x: 0, y: 0, w: 4, h: 4 }, id: 'p' }), options },
+    ];
+    expect(expectErr(validateDashboard(model)).errors[0].code).toBe('too_many');
+  });
+
+  it('reports a missing required field as required, not wrong_type', () => {
+    const { time: _drop, ...rest } = minimal();
+    expect(expectErr(validateDashboard(rest)).errors[0].code).toBe('required');
+  });
+
+  it('gives every warning a code', () => {
+    const model = minimal();
+    model.panels = [createPanel({ type: 'stat', gridPos: { x: 20, y: 0, w: 12, h: 4 }, id: 'p' })];
+    const result = expectOk(validateDashboard(JSON.parse(JSON.stringify(model))));
+    expect(result.warnings.length).toBeGreaterThan(0);
+    for (const w of result.warnings) expect(w.code).toBeTruthy();
+  });
+});
+
+describe('regression: misc field rules', () => {
+  it('rejects a whitespace-only title', () => {
+    expect(expectErr(validateDashboard({ ...minimal(), title: '    ' })).errors[0].code).toBe(
+      'required',
+    );
+  });
+
+  it('measures SQL length in UTF-8 bytes, not UTF-16 code units', () => {
+    const model = minimal();
+    // Each emoji is 2 code units but 4 bytes: under the cap by .length, over
+    // it by bytes.
+    const sql = '\u{1F642}'.repeat(Math.ceil(LIMITS.maxSqlBytes / 3));
+    model.panels = [
+      {
+        ...createPanel({ type: 'stat', gridPos: { x: 0, y: 0, w: 4, h: 4 }, id: 'p' }),
+        targets: [{ refId: 'A', sql }],
+      },
+    ];
+    expect(sql.length).toBeLessThan(LIMITS.maxSqlBytes);
+    expectErr(validateDashboard(JSON.parse(JSON.stringify(model))));
+  });
+
+  it('reports a missing fixedColor on the field, not the whole color object', () => {
+    const model = minimal() as unknown as Record<string, unknown>;
+    model.panels = [
+      {
+        ...createPanel({ type: 'stat', gridPos: { x: 0, y: 0, w: 4, h: 4 }, id: 'p' }),
+        fieldConfig: { defaults: { color: { mode: 'fixed' } } },
+      },
+    ];
+    const result = expectErr(validateDashboard(model));
+    expect(result.errors[0].path).toBe('panels[0].fieldConfig.defaults.color.fixedColor');
   });
 });

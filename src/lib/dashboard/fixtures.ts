@@ -43,7 +43,6 @@ export function fullyPopulatedDashboard(): Dashboard {
         includeAll: true,
         allValue: 'ALL_HOSTS',
         refresh: 'on-time-range-change',
-        regex: '^web-',
         sort: 'alpha-asc',
         instanceId: 'inst-variable',
         auto: true,
@@ -93,7 +92,6 @@ export function fullyPopulatedDashboard(): Dashboard {
             mappings: [
               { type: 'value', value: '0', result: { text: 'idle', color: 'blue' } },
               { type: 'range', from: 1, to: 50, result: { text: 'low' } },
-              { type: 'regex', pattern: '^err', result: { text: 'error', color: 'red' } },
               { type: 'special', match: 'null', result: { text: 'N/A' } },
             ],
             custom: { lineWidth: 2, fillOpacity: 10 },
