@@ -74,6 +74,17 @@ describe('detectLogFieldsWithData — validating names against values', () => {
     expect(m.timestamp).toBeNull();
   });
 
+  it('keeps a named timestamp when a later sample row contains a valid value', () => {
+    const m = detectLogFieldsWithData(
+      ['time', 'msg'],
+      [
+        [null, 'starting'],
+        ['2026-01-01T00:00:00Z', 'ready'],
+      ],
+    );
+    expect(m.timestamp).toBe('time');
+  });
+
   it('clears a level whose value is not a known level', () => {
     const m = detectLogFieldsWithData(['level', 'msg'], ['banana', 'boom']);
     expect(m.level).toBeNull();
@@ -82,6 +93,17 @@ describe('detectLogFieldsWithData — validating names against values', () => {
   it('finds a timestamp by value when no column name matched', () => {
     const m = detectLogFieldsWithData(['a', 'b'], ['x', '2026-01-01T00:00:00Z']);
     expect(m.timestamp).toBe('b');
+  });
+
+  it('finds a timestamp across multiple sample rows without choosing small integers', () => {
+    const m = detectLogFieldsWithData(
+      ['retries', 'event_time'],
+      [
+        [1, null],
+        [2, '2026-01-01T00:00:00Z'],
+      ],
+    );
+    expect(m.timestamp).toBe('event_time');
   });
 
   it('finds a level by value when no column name matched', () => {
@@ -106,16 +128,10 @@ describe('detectLogFieldsWithData — validating names against values', () => {
     },
   );
 
-  // KNOWN BUG — see #54. isTimestampValue ends with a bare `new Date(str)`
-  // check guarded only by a year range, and `new Date("12")` is 2001-12-01.
-  // So any integer in 1..12 (and 2001..2099) is accepted, which lets a numeric
-  // column be picked as the timestamp when no column name matched. These
-  // assertions document the current behaviour so the fix has a failing test to
-  // flip; they are NOT the behaviour we want.
-  it.each([[12], ['5'], ['2026']])(
-    'currently mis-accepts %j as a timestamp (#54)',
+  it.each([[12], ['5'], ['2026'], [' 12 '], [-1], ['5.5']])(
+    'rejects bare numeric-looking value %j as a timestamp (#54)',
     (value) => {
-      expect(detectLogFieldsWithData(['a'], [value]).timestamp).toBe('a');
+      expect(detectLogFieldsWithData(['a'], [value]).timestamp).toBeNull();
     },
   );
 
