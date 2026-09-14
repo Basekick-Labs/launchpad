@@ -1,12 +1,12 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import https from 'node:https';
-import http from 'node:http';
+import type http from 'node:http';
 import { dev } from '$app/environment';
 import { getDb } from '$lib/server/db';
 import { getInstance } from '$lib/server/instance';
 import { allowPrivateEndpoints } from '$lib/server/arcConnection';
 import { assertSafeResolvedUrl, type ResolvedTarget } from '$lib/server/ssrf';
+import { streamUpstreamWithFallback, ResponseTooLargeError } from '$lib/server/arcProxy';
 
 // Only these response headers from the upstream Arc server are forwarded back
 // to the browser. Everything else is dropped so a malicious/compromised
@@ -83,81 +83,15 @@ function isMemberAllowed(method: string, canonicalPath: string): boolean {
   return false;
 }
 
-// Try each validated IP the host resolved to, falling back on connection-level
-// errors. A dual-stack host may resolve to ::1 and 127.0.0.1 while the upstream
-// listens on only one family; every IP already passed the SSRF safety check, so
-// trying the next is safe. An HTTP response (any status) ends the loop — that's
-// a real answer, not a connection failure.
-async function proxyWithFallback(
-  method: string,
-  resolved: ResolvedTarget,
-  hostHeader: string,
-  path: string,
-  headers: Record<string, string>,
-  body: Buffer | null,
-): Promise<{ status: number; headers: Record<string, string>; body: Buffer }> {
-  let lastErr: unknown;
-  for (const ip of resolved.ips) {
-    try {
-      return await proxyViaNode(method, resolved, ip, hostHeader, path, headers, body);
-    } catch (err) {
-      lastErr = err;
+/** Applies the response allowlist to the upstream's raw headers. */
+function filterResponseHeaders(raw: http.IncomingHttpHeaders): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (value && ALLOWED_RESPONSE_HEADERS.has(key.toLowerCase())) {
+      out[key] = Array.isArray(value) ? value.join(', ') : value;
     }
   }
-  throw lastErr ?? new Error('Proxy error');
-}
-
-function proxyViaNode(
-  method: string,
-  resolved: ResolvedTarget,
-  ip: string,
-  hostHeader: string,
-  path: string,
-  headers: Record<string, string>,
-  body: Buffer | null,
-): Promise<{ status: number; headers: Record<string, string>; body: Buffer }> {
-  return new Promise((resolve, reject) => {
-    const isHttps = resolved.protocol === 'https:';
-    const mod = isHttps ? https : http;
-
-    // Dial a validated pinned IP; keep the original hostname for the Host header
-    // and TLS SNI. This closes the DNS-rebinding window.
-    const options = {
-      host: ip,
-      servername: isHttps ? resolved.hostname : undefined,
-      port: resolved.port,
-      path: `/${path}`,
-      method,
-      headers: { ...headers, Host: hostHeader },
-      ...(isHttps && dev ? { rejectUnauthorized: false } : {}),
-    };
-
-    const req = mod.request(options, (res) => {
-      const chunks: Buffer[] = [];
-      res.on('data', (chunk) => chunks.push(chunk));
-      res.on('end', () => {
-        const respHeaders: Record<string, string> = {};
-        for (const [key, value] of Object.entries(res.headers)) {
-          if (value && ALLOWED_RESPONSE_HEADERS.has(key.toLowerCase())) {
-            respHeaders[key] = Array.isArray(value) ? value.join(', ') : value;
-          }
-        }
-        resolve({
-          status: res.statusCode || 502,
-          headers: respHeaders,
-          body: Buffer.concat(chunks),
-        });
-      });
-    });
-
-    req.on('error', reject);
-    req.setTimeout(30000, () => { req.destroy(new Error('Proxy timeout')); });
-
-    if (body && method !== 'GET' && method !== 'HEAD') {
-      req.write(body);
-    }
-    req.end();
-  });
+  return out;
 }
 
 async function proxyRequest(request: Request, params: { org_id: string; id: string; path: string }, locals: App.Locals) {
@@ -248,17 +182,56 @@ async function proxyRequest(request: Request, params: { org_id: string; id: stri
 
   const hostHeader = new URL(instance.endpoint_url).host;
   try {
-    const result = await proxyWithFallback(request.method, resolved, hostHeader, targetPath, headers, body);
+    const result = await streamUpstreamWithFallback(
+      {
+        method: request.method,
+        resolved,
+        hostHeader,
+        path: targetPath,
+        headers,
+        body,
+        allowSelfSigned: dev,
+        onStreamError: (err) => {
+          // The response status is already committed, so this cannot become a
+          // 502 — but a truncated download must not be silent.
+          console.error('Proxy stream error:', {
+            org_id: params.org_id,
+            instance_id: params.id,
+            path: canonicalPath,
+            error: err.message,
+          });
+        },
+      },
+      resolved.ips,
+    );
 
     // Force nosniff so a spoofed/omitted Content-Type can't be sniffed into
     // active content executing on the Launchpad origin.
-    const respHeaders = { ...result.headers, 'X-Content-Type-Options': 'nosniff' };
+    const respHeaders = {
+      ...filterResponseHeaders(result.headers),
+      'X-Content-Type-Options': 'nosniff',
+    };
 
-    return new Response(new Uint8Array(result.body), {
+    // `result.body` is null for a null-body status (204/205/304) and for HEAD.
+    // Passing anything else there — including a zero-length buffer — makes
+    // `new Response` throw.
+    return new Response(result.body, {
       status: result.status,
       headers: respHeaders,
     });
   } catch (err: any) {
+    if (err instanceof ResponseTooLargeError) {
+      console.error('Proxy response too large:', {
+        org_id: params.org_id,
+        instance_id: params.id,
+        path: canonicalPath,
+        limit: err.limit,
+      });
+      return json(
+        { error: 'Arc response is too large to proxy. Narrow the query or add a LIMIT.' },
+        { status: 502 },
+      );
+    }
     console.error('Proxy error:', err.message);
     return json({ error: 'Proxy error' }, { status: 502 });
   }
