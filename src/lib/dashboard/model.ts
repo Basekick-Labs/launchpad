@@ -923,9 +923,33 @@ export function createDashboard(opts: {
  *
  * Used by storage, the dirty-check, the version diff and export alike, so the
  * four cannot disagree about what "unchanged" means.
+ *
+ * REQUIRES a depth-bounded model: throws {@link DashboardTooDeepError} rather
+ * than letting `JSON.stringify` blow the stack. Anything that has been through
+ * the validator qualifies.
  */
 export function serializeForSave(model: Dashboard): string {
   return JSON.stringify(sortKeys(model));
+}
+
+/**
+ * Thrown by {@link serializeForSave} for a model too deep to serialize.
+ *
+ * `sortKeys` is iterative, but `JSON.stringify` is recursive in V8 and there is
+ * no way around that short of writing a full serializer — and the depth at
+ * which it overflows varies by Node version, so it cannot even be pinned to a
+ * constant. A validated model is always within `LIMITS.maxDepth`, so this only
+ * fires for a model that never went through the validator (the Grafana import
+ * adapter builds one before validating).
+ *
+ * It exists so that case surfaces as a catchable, explicable error instead of
+ * a bare RangeError from deep inside a serializer.
+ */
+export class DashboardTooDeepError extends Error {
+  constructor(readonly depth: number) {
+    super(`Dashboard nests ${depth} levels deep, past the limit of ${LIMITS.maxDepth}`);
+    this.name = 'DashboardTooDeepError';
+  }
 }
 
 /**
@@ -943,6 +967,9 @@ export function serializeForSave(model: Dashboard): string {
  */
 function sortKeys(value: unknown): unknown {
   if (value === null || typeof value !== 'object') return value;
+
+  const depth = depthOf(value);
+  if (depth > LIMITS.maxDepth) throw new DashboardTooDeepError(depth);
 
   type Frame = { src: unknown; dst: unknown; keys: string[]; i: number };
   const rootDst: unknown = Array.isArray(value) ? [] : {};
@@ -990,6 +1017,32 @@ function sortKeys(value: unknown): unknown {
   }
 
   return rootDst;
+}
+
+/** Iterative depth probe, so the guard itself cannot overflow. */
+function depthOf(value: unknown): number {
+  let deepest = 0;
+  const nodes: unknown[] = [value];
+  const depths: number[] = [0];
+  while (nodes.length > 0) {
+    const node = nodes.pop();
+    const depth = depths.pop()!;
+    if (depth > deepest) deepest = depth;
+    if (deepest > LIMITS.maxDepth) return deepest;
+    if (node === null || typeof node !== 'object') continue;
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        nodes.push(child);
+        depths.push(depth + 1);
+      }
+    } else {
+      for (const key of Object.keys(node as Record<string, unknown>)) {
+        nodes.push((node as Record<string, unknown>)[key]);
+        depths.push(depth + 1);
+      }
+    }
+  }
+  return deepest;
 }
 
 // ---------------------------------------------------------------------------

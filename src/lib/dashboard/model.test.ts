@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { fullyPopulatedDashboard } from './fixtures';
 import {
+  DashboardTooDeepError,
   GRID_COLUMNS,
   LAUNCHPAD_SCHEMA_VERSION,
   PANEL_ID_PATTERN,
@@ -328,10 +330,12 @@ describe('regression: isSafeColor accepts real CSS and rejects invalid hex', () 
 });
 
 describe('regression: serializeForSave is iterative and __proto__-safe', () => {
-  it('does not stack-overflow on a deeply nested model', () => {
-    // A recursive sort would overflow on exactly the deep input the validator
-    // rejects iteratively — and this is exported for general use, so the
-    // Grafana import adapter will hand it unvalidated models.
+  it('fails with an explicable error, not a RangeError, on a too-deep model', () => {
+    // sortKeys is iterative, but JSON.stringify is recursive in V8 and the
+    // depth at which it overflows varies by Node version — this very test
+    // passed on Node 26 and failed on 20 and 22 before the guard existed. So
+    // the contract is a depth bound, checked up front, rather than a promise
+    // the serializer cannot keep.
     const d = createDashboard({ title: 'T', instanceId: 'i' });
     let deep: unknown = 1;
     for (let i = 0; i < 20_000; i++) deep = { a: deep };
@@ -341,7 +345,13 @@ describe('regression: serializeForSave is iterative and __proto__-safe', () => {
         options: { deep },
       },
     ];
-    expect(() => serializeForSave(d)).not.toThrow();
+    expect(() => serializeForSave(d)).toThrow(DashboardTooDeepError);
+  });
+
+  it('serializes any model that has been through the validator', () => {
+    // Validated models are within LIMITS.maxDepth by construction, so the
+    // guard never fires on the path that actually matters.
+    expect(() => serializeForSave(fullyPopulatedDashboard())).not.toThrow();
   });
 
   it('keeps a __proto__ key as data instead of silently dropping it', () => {
