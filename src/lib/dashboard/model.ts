@@ -129,6 +129,14 @@ export const LIMITS = {
   maxPanelHeight: 100,
   /** Errors returned before truncating; a hostile document fails every field. */
   maxErrors: 100,
+  /**
+   * Versions retained per dashboard. Lives here rather than in the store
+   * because the version-history UI needs it too, and that is client code which
+   * cannot import from `$lib/server`.
+   */
+  maxVersionHistory: 20,
+  /** Save message accompanying a version, bounded since it is outside the model. */
+  maxVersionMessage: 256,
 } as const;
 
 export const UID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
@@ -702,6 +710,33 @@ export interface Dashboard {
 }
 
 /**
+ * A dashboard as it appears in a list: the projection columns, without the
+ * model blob. Declared here rather than beside the store because the list page
+ * renders it and cannot import a `$lib/server` module.
+ */
+export interface DashboardSummary {
+  uid: string;
+  title: string;
+  description: string | null;
+  tags: string[];
+  version: number;
+  createdBy: string;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One entry in a dashboard's version history, without its blob. */
+export interface VersionSummary {
+  version: number;
+  createdBy: string;
+  createdAt: string;
+  message: string | null;
+  /** True for the version currently live on the dashboard. */
+  current: boolean;
+}
+
+/**
  * A stored dashboard: content plus the identity and concurrency metadata that
  * must NOT live inside the document. `version` is the optimistic-concurrency
  * token and belongs to the storage row alone — mirroring it into the blob makes
@@ -712,6 +747,7 @@ export interface DashboardRecord {
   orgId: string;
   version: number;
   createdBy: string;
+  updatedBy: string;
   createdAt: string;
   updatedAt: string;
   model: Dashboard;
