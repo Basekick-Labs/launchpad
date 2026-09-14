@@ -451,6 +451,16 @@ const CANONICAL_ZONES: ReadonlySet<string> = (() => {
   return set;
 })();
 
+/**
+ * Bounded, because this runs server-side on every dashboard write, the key is a
+ * string from the request body, and a MISS is cached too — so distinct bogus
+ * zone names grow it on requests that then 400. Real zones plus aliases number
+ * in the hundreds, so the cap is never reached by legitimate use.
+ *
+ * Past the cap we stop caching rather than evict: no policy to get wrong, and
+ * the probe still runs, so correctness never depends on the cache.
+ */
+const MAX_PROBED_ZONES = 1000;
 const probedZones = new Map<string, boolean>();
 
 /**
@@ -475,7 +485,7 @@ function isValidTimezone(tz: string): boolean {
   } catch {
     valid = false;
   }
-  probedZones.set(tz, valid);
+  if (probedZones.size < MAX_PROBED_ZONES) probedZones.set(tz, valid);
   return valid;
 }
 
