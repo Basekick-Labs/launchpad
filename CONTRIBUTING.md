@@ -63,6 +63,20 @@ npm test                    # unit tests
 npm run build               # production bundle — must pass
 ```
 
+### Running tests
+
+Tests run on [vitest](https://vitest.dev) in a Node environment. Test files live next to the code they cover as `*.test.ts`.
+
+```sh
+npm test                          # run once
+npm run test:watch                # re-run on change
+npm test -- src/lib/sqlParser     # a single file or pattern
+```
+
+`vitest.config.ts` deliberately does not load the SvelteKit plugin — these are unit tests over pure logic (parsers, classifiers, SQL builders), and skipping the plugin keeps runs fast and avoids needing `svelte-kit sync` first. The trade-off is that `$env/*` and `$app/*` do not resolve, so a module importing them (for example `src/lib/server/arcConnection.ts`) cannot be unit tested — exercise those through the running app instead. `$lib`, `$components`, and `$server` all resolve normally.
+
+Where a test documents behaviour we know is wrong, say so in a comment and link the issue, so the fix has a failing assertion to flip rather than a silent expectation to discover.
+
 Notes:
 
 - `npm run dev` sets `NODE_TLS_REJECT_UNAUTHORIZED=0` so a local Arc instance with a self-signed certificate works. That is a development convenience and must never be relied on in the application code.
