@@ -117,6 +117,10 @@ Common values (see [`helm/launchpad/values.yaml`](helm/launchpad/values.yaml) fo
 
 After signing in, add a connection with your Arc instance's endpoint URL (e.g. `http://localhost:8000`) and an admin token. Arc Launchpad verifies the connection and then lets you query and manage that instance.
 
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get a change from idea to merged, and browse [`good first issue`](https://github.com/Basekick-Labs/launchpad/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) for scoped work with a clear starting point.
+
 ## License
 
-[Apache-2.0](LICENSE).
+[Apache-2.0](LICENSE). Contributions are covered by the [CLA](CLA.md).
