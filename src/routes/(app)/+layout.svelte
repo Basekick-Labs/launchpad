@@ -6,18 +6,25 @@
   import { Button } from '$lib/components/ui/button';
   import { invalidateAll } from '$app/navigation';
   import {
-    LayoutDashboard, Server, Users, Settings, LogOut, BookOpen, Building2, ChevronsUpDown
+    LayoutDashboard, BarChart3, Server, Users, Settings, LogOut, BookOpen, Building2, ChevronsUpDown
   } from 'lucide-svelte';
 
   export let data: any;
 
   $: currentPath = $page.url.pathname;
 
+  // Not startsWith: '/dashboards'.startsWith('/dashboard') is true, which would
+  // light up both nav entries at once.
+  function isActive(href: string, path: string): boolean {
+    return path === href || path.startsWith(href + '/');
+  }
+
   $: orgs = (data.organizations ?? []) as Array<{ id: string; name: string }>;
   $: activeOrgId = data.activeOrg?.id ?? '';
 
   $: navItems = [
     { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+    { href: '/dashboards', label: 'Dashboards', icon: BarChart3 },
     { href: '/instances', label: 'Instances', icon: Server },
     { href: '/team', label: 'Team', icon: Users },
     ...(data.user?.is_operator ? [{ href: '/orgs', label: 'Orgs', icon: Building2 }] : []),
@@ -95,7 +102,7 @@
           target={item.external ? '_blank' : undefined}
           rel={item.external ? 'noopener noreferrer' : undefined}
           class="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors
-            {!item.external && currentPath.startsWith(item.href) ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'}"
+            {!item.external && isActive(item.href, currentPath) ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'}"
         >
           <svelte:component this={item.icon} class="h-4 w-4" />
           {item.label}

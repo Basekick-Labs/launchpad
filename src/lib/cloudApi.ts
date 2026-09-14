@@ -280,3 +280,79 @@ export async function webauthnDeleteCredential(id: string): Promise<void> {
     throw new Error(d.error || 'Failed to delete passkey');
   }
 }
+
+// ---------------------------------------------------------------------------
+// Dashboards
+// ---------------------------------------------------------------------------
+//
+// `import type` deliberately: cloudApi.ts is imported by the (app) layout, so a
+// value import would pull the dashboard model into the layout chunk on every
+// page in the app.
+
+import type { Dashboard, DashboardRecord } from '$lib/dashboard/model';
+
+/** Parse an error body if there is one, else fall back to the status. */
+async function apiError(res: Response, fallback: string): Promise<Error> {
+  try {
+    const body = await res.json();
+    // Every route in this repo returns { error }, never { message }.
+    return new Error(body?.error || fallback);
+  } catch {
+    // A non-JSON body (an unhandled 500 renders SvelteKit's HTML page) would
+    // otherwise throw a SyntaxError that masks the real failure.
+    return new Error(`${fallback} (${res.status})`);
+  }
+}
+
+export async function createDashboardRequest(
+  orgId: string,
+  model: Dashboard,
+): Promise<DashboardRecord> {
+  const res = await fetch(`/api/v1/orgs/${orgId}/dashboards`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(model),
+  });
+  if (!res.ok) throw await apiError(res, 'Failed to create dashboard');
+  const body = await res.json();
+  return body.dashboard as DashboardRecord;
+}
+
+export async function deleteDashboardRequest(orgId: string, uid: string): Promise<void> {
+  const res = await fetch(`/api/v1/orgs/${orgId}/dashboards/${encodeURIComponent(uid)}`, {
+    method: 'DELETE',
+  });
+  // 204: there is no body to parse on success.
+  if (!res.ok) throw await apiError(res, 'Failed to delete dashboard');
+}
+
+/**
+ * Update a dashboard.
+ *
+ * `expectedVersion` is the version the caller last read. It travels as a query
+ * parameter rather than in the body so the body is exactly the model — the
+ * request size cap then bounds the model itself, and there is no `version`
+ * field adjacent to the blob for a spread to fold back into it. A stale value
+ * yields 409 with the current version in the body.
+ */
+export async function updateDashboardRequest(
+  orgId: string,
+  uid: string,
+  model: Dashboard,
+  expectedVersion: number,
+  message?: string,
+): Promise<DashboardRecord> {
+  const params = new URLSearchParams({ expectedVersion: String(expectedVersion) });
+  if (message) params.set('message', message);
+  const res = await fetch(
+    `/api/v1/orgs/${orgId}/dashboards/${encodeURIComponent(uid)}?${params}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(model),
+    },
+  );
+  if (!res.ok) throw await apiError(res, 'Failed to save dashboard');
+  const body = await res.json();
+  return body.dashboard as DashboardRecord;
+}

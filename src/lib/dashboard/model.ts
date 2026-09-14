@@ -695,10 +695,14 @@ export interface Dashboard {
   description?: string;
   tags: string[];
   /**
-   * Default Arc instance; panels and targets may override it. Null means
-   * "unset" — an export shared outside the org externalizes its instance
-   * reference so the importer can pick their own. Storage rejects null on save;
-   * shape is the validator's concern, resolvability is storage's.
+   * Default Arc instance; panels and targets may override it.
+   *
+   * Null means "unset", and saving one is legal: a new dashboard has no
+   * instance until a panel needs one, and an export shared outside the org
+   * externalizes its reference so the importer can pick their own. What
+   * rejects an unset instance is QUERY EXECUTION, not save — see
+   * `resolveTargetInstance`. Requiring an instance at save time would mean
+   * asking the user to choose one before they can create a dashboard at all.
    */
   instanceId: string | null;
   time: TimeSettings;
@@ -719,6 +723,13 @@ export interface DashboardSummary {
   title: string;
   description: string | null;
   tags: string[];
+  /**
+   * Literal instance ids this dashboard references, at any level. Sourced from
+   * the refs table rather than a projection column, because `instanceId` may
+   * hold a `$variable` reference which is not an id at all — a fully templated
+   * dashboard therefore reports an empty array.
+   */
+  instanceIds: string[];
   version: number;
   createdBy: string;
   updatedBy: string;

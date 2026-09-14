@@ -175,6 +175,7 @@ export function insertDashboard(args: {
   userId: string;
   model: Dashboard;
   instanceIds: readonly string[];
+  /** Labels the v1 history row. Optional; the create route does not prompt. */
   message?: string | null;
 }): DashboardRecord {
   const db = getDb();
@@ -194,6 +195,24 @@ export function insertDashboard(args: {
   const created = getDashboard(args.orgId, uid);
   if (!created) throw new DashboardNotFoundError();
   return created;
+}
+
+/**
+ * Identity and concurrency columns only, without the blob.
+ *
+ * The author checks in the PUT and DELETE handlers need exactly two fields, and
+ * reaching for `getDashboard` made them `JSON.parse` up to a megabyte to read
+ * one of them — on PUT, one of three separate reads of the same blob.
+ */
+export function getDashboardMeta(
+  orgId: OrgScope,
+  uid: string,
+): { createdBy: string; version: number } | null {
+  const db = getDb();
+  const row = db
+    .prepare('SELECT created_by, version FROM dashboards WHERE uid = ? AND org_id = ?')
+    .get(uid, orgId) as { created_by: string; version: number } | undefined;
+  return row ? { createdBy: row.created_by, version: row.version } : null;
 }
 
 export function getDashboard(orgId: OrgScope, uid: string): DashboardRecord | null {
@@ -242,11 +261,30 @@ export function listDashboards(orgId: OrgScope): DashboardSummary[] {
          FROM dashboards WHERE org_id = ? ORDER BY updated_at DESC`,
     )
     .all(orgId) as Array<Omit<DashboardRow, 'org_id' | 'model_json'>>;
+
+  // One query for the whole org rather than one per dashboard: the refs table
+  // is keyed (dashboard_uid, instance_id), so this is an index scan.
+  const refRows = db
+    .prepare(
+      `SELECT r.dashboard_uid, r.instance_id
+         FROM dashboard_instance_refs r
+         JOIN dashboards d ON d.uid = r.dashboard_uid
+        WHERE d.org_id = ?`,
+    )
+    .all(orgId) as Array<{ dashboard_uid: string; instance_id: string }>;
+  const refsByUid = new Map<string, string[]>();
+  for (const ref of refRows) {
+    const list = refsByUid.get(ref.dashboard_uid);
+    if (list) list.push(ref.instance_id);
+    else refsByUid.set(ref.dashboard_uid, [ref.instance_id]);
+  }
+
   return rows.map((r) => ({
     uid: r.uid,
     title: r.title,
     description: r.description,
     tags: JSON.parse(r.tags) as string[],
+    instanceIds: refsByUid.get(r.uid) ?? [],
     version: r.version,
     createdBy: r.created_by,
     updatedBy: r.updated_by,

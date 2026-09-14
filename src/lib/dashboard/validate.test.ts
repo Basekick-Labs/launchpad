@@ -490,8 +490,9 @@ describe('referencedInstanceIds', () => {
   });
 
   it('accepts a null instanceId so a shared export can round-trip', () => {
-    // Export-for-sharing externalizes the instance; storage rejects null on
-    // save, but the shape is legal so the file can be re-imported at all.
+    // Export-for-sharing externalizes the instance. Saving null is legal —
+    // execution is what requires a resolvable instance — so a shared export
+    // round-trips, and a brand-new dashboard needs no instance picker.
     const model = { ...minimal(), instanceId: null };
     expectOk(validateDashboard(model));
   });
