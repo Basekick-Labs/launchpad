@@ -16,6 +16,11 @@ export function getDb(): Database.Database {
     db = new Database(DB_PATH);
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
+    // Without this a contending writer fails instantly with SQLITE_BUSY rather
+    // than waiting. One app process writes today, but a backup script or a
+    // sqlite3 shell contends too, and dashboards are the first feature running
+    // a multi-statement write transaction on every user action.
+    db.pragma('busy_timeout = 5000');
     // The DB stores secrets at rest (Arc admin tokens, SMTP/webhook config).
     // Restrict the file (and WAL/SHM siblings) to the owner only. Best-effort:
     // on platforms/filesystems without POSIX perms this silently no-ops.
@@ -203,6 +208,56 @@ function runMigrations(db: Database.Database) {
       PRIMARY KEY (source, dedup_key)
     );
 
+    -- Dashboards. The model blob is the source of truth for content; title,
+    -- description and tags are projections written in the same transaction so
+    -- the list page never parses 200 JSON documents.
+    --
+    -- ON DELETE CASCADE is load-bearing: the operator org-delete route hard
+    -- deletes the organizations row, and with foreign_keys = ON a plain
+    -- reference would abort that whole transaction for any org that has ever
+    -- had a dashboard.
+    --
+    -- There is deliberately NO instance_id column. Dashboard.instanceId may
+    -- hold a variable reference (a leading dollar sign) rather than an id,
+    -- which would silently poison any index built on it;
+    -- dashboard_instance_refs holds the resolved literal ids instead.
+    CREATE TABLE IF NOT EXISTS dashboards (
+      uid TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      description TEXT,
+      tags TEXT NOT NULL,
+      model_json TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      created_by TEXT NOT NULL,
+      updated_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    -- Append-only history. The row for version N holds the content that version
+    -- N *is*, so MAX(version) equals dashboards.version and restoring version N
+    -- returns what N looked like. Storing the previous content instead would
+    -- leave the current version absent from the table entirely.
+    CREATE TABLE IF NOT EXISTS dashboard_versions (
+      dashboard_uid TEXT NOT NULL REFERENCES dashboards(uid) ON DELETE CASCADE,
+      version INTEGER NOT NULL,
+      model_json TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      message TEXT,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (dashboard_uid, version)
+    );
+
+    -- Every literal instance id a dashboard references, at any of the four
+    -- levels. Answers "which dashboards break if I delete instance X", which
+    -- the dashboard-level column alone could not.
+    CREATE TABLE IF NOT EXISTS dashboard_instance_refs (
+      dashboard_uid TEXT NOT NULL REFERENCES dashboards(uid) ON DELETE CASCADE,
+      instance_id TEXT NOT NULL,
+      PRIMARY KEY (dashboard_uid, instance_id)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_instances_org ON instances(org_id);
     CREATE INDEX IF NOT EXISTS idx_instances_resource_id ON instances(resource_id);
     CREATE INDEX IF NOT EXISTS idx_instance_events_instance ON instance_events(instance_id);
@@ -218,6 +273,10 @@ function runMigrations(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_alert_rules_instance_id ON alert_rules(instance_id);
     CREATE INDEX IF NOT EXISTS idx_alert_executions_rule_id ON alert_executions(alert_rule_id);
     CREATE INDEX IF NOT EXISTS idx_alert_dedup_last_sent ON alert_dedup(last_sent_at);
+    -- Covers the list query and its ORDER BY in one index.
+    CREATE INDEX IF NOT EXISTS idx_dashboards_org ON dashboards(org_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_dashboard_instance_refs_instance
+      ON dashboard_instance_refs(instance_id);
   `);
 
   // Rebuild the legacy cloud/billing `instances` table (with tier/region/
@@ -280,7 +339,57 @@ function migrateLegacyInstancesTable(db: Database.Database): void {
         FROM instances;
         DROP TABLE instances;
         ALTER TABLE instances_new RENAME TO instances;
-        CREATE INDEX IF NOT EXISTS idx_instances_org ON instances(org_id);
+        -- Dashboards. The model blob is the source of truth for content; title,
+    -- description and tags are projections written in the same transaction so
+    -- the list page never parses 200 JSON documents.
+    --
+    -- ON DELETE CASCADE is load-bearing: the operator org-delete route hard
+    -- deletes the organizations row, and with foreign_keys = ON a plain
+    -- reference would abort that whole transaction for any org that has ever
+    -- had a dashboard.
+    --
+    -- There is deliberately NO instance_id column. Dashboard.instanceId may
+    -- hold a variable reference (a leading dollar sign) rather than an id,
+    -- which would silently poison any index built on it;
+    -- dashboard_instance_refs holds the resolved literal ids instead.
+    CREATE TABLE IF NOT EXISTS dashboards (
+      uid TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      description TEXT,
+      tags TEXT NOT NULL,
+      model_json TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      created_by TEXT NOT NULL,
+      updated_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    -- Append-only history. The row for version N holds the content that version
+    -- N *is*, so MAX(version) equals dashboards.version and restoring version N
+    -- returns what N looked like. Storing the previous content instead would
+    -- leave the current version absent from the table entirely.
+    CREATE TABLE IF NOT EXISTS dashboard_versions (
+      dashboard_uid TEXT NOT NULL REFERENCES dashboards(uid) ON DELETE CASCADE,
+      version INTEGER NOT NULL,
+      model_json TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      message TEXT,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (dashboard_uid, version)
+    );
+
+    -- Every literal instance id a dashboard references, at any of the four
+    -- levels. Answers "which dashboards break if I delete instance X", which
+    -- the dashboard-level column alone could not.
+    CREATE TABLE IF NOT EXISTS dashboard_instance_refs (
+      dashboard_uid TEXT NOT NULL REFERENCES dashboards(uid) ON DELETE CASCADE,
+      instance_id TEXT NOT NULL,
+      PRIMARY KEY (dashboard_uid, instance_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_instances_org ON instances(org_id);
         CREATE INDEX IF NOT EXISTS idx_instances_resource_id ON instances(resource_id);
       `);
     });

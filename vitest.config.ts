@@ -24,5 +24,13 @@ export default defineConfig({
     // need their own environment and the svelte plugin.
     environment: 'node',
     include: ['src/**/*.{test,spec}.ts'],
+    env: {
+      // MUST be set here, not in a test file. src/lib/server/db.ts reads this
+      // at module evaluation and caches a singleton, and ESM hoists imports —
+      // so `process.env.LAUNCHPAD_DB_PATH = ':memory:'` written above an import
+      // runs *after* it, and the suite would silently open and write to the
+      // developer's real data/launchpad.db.
+      LAUNCHPAD_DB_PATH: ':memory:',
+    },
   },
 });
