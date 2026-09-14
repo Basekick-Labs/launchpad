@@ -1,0 +1,65 @@
+# PR check gate. Until this existed the only workflow here was release.yml,
+# which runs on tag push — so a pull request had no checks at all and review
+# relied entirely on the author running things locally.
+#
+# The Node matrix is deliberate. package.json declares engines >=20 and the
+# README promises Node 20+, while the Dockerfile ships node:22-slim, so both
+# need to actually work. This is not theoretical: better-sqlite3 11.10.0 was
+# installable on a Node it could not compile against, and nothing caught it
+# until every request 500'd at runtime (#53). Testing the floor we promise and
+# the version we ship is what makes that class of drift visible here instead.
+#
+# fail-fast is off so a failure on one Node version still reports the other,
+# which is the information you actually want when diagnosing a version issue.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check, test & build (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # ci, not install: the lockfile is the input. This also exercises the
+      # engine-strict=true in .npmrc, so a dependency that does not support
+      # this Node version fails here rather than at runtime.
+      - name: Install
+        run: npm ci
+
+      # First, because a type error makes the build failure downstream noise.
+      - name: Typecheck
+        run: npm run check
+
+      - name: Test
+        run: npm test
+
+      # SvelteKit's postbuild analyse step imports the server chunks, which
+      # trips the production guard in src/lib/server/auth.ts. The value is
+      # irrelevant to the build — it just has to be present.
+      - name: Build
+        run: npm run build
+        env:
+          LAUNCHPAD_JWT_SECRET: ci-build-only-not-a-real-secret
