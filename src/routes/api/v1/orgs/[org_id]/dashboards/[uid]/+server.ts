@@ -5,6 +5,7 @@ import {
   DashboardNotFoundError,
   deleteDashboard,
   getDashboard,
+  getDashboardMeta,
   updateDashboard,
 } from '$lib/server/dashboards';
 import { assertInstancesInOrg } from '$lib/server/dashboardInstance';
@@ -12,7 +13,7 @@ import { readBoundedBody } from '$lib/server/util';
 import { parseAndValidate } from '$lib/dashboard/validate';
 import { LIMITS } from '$lib/dashboard/model';
 import { roleAtLeast } from '$lib/roles';
-import { toErrorResponse } from '../_shared';
+import { toErrorResponse, parseVersionParam } from '../_shared';
 
 export const GET: RequestHandler = async ({ locals, params }) => {
   try {
@@ -34,12 +35,18 @@ export const PUT: RequestHandler = async ({ locals, params, request, url }) => {
     // to bound, and there is no `version` field sitting next to the blob for a
     // careless spread to fold back into it (which is what made a restored
     // dashboard permanently unsaveable).
-    const expectedVersion = Number(url.searchParams.get('version'));
-    if (!Number.isInteger(expectedVersion) || expectedVersion < 1) {
-      return json({ error: 'A ?version= query parameter is required' }, { status: 400 });
+    //
+    // Named `expectedVersion` rather than `version` because the restore route
+    // has a `version` in its PATH meaning something else entirely.
+    const expectedVersion = parseVersionParam(url.searchParams.get('expectedVersion') ?? undefined);
+    if (Number.isNaN(expectedVersion)) {
+      return json(
+        { error: 'An ?expectedVersion= query parameter is required' },
+        { status: 400 },
+      );
     }
 
-    const existing = getDashboard(orgId, params.uid!);
+    const existing = getDashboardMeta(orgId, params.uid!);
     if (!existing) throw new DashboardNotFoundError();
     // Members may edit their own dashboards; changing someone else's shared
     // dashboard needs admin.
@@ -76,7 +83,7 @@ export const PUT: RequestHandler = async ({ locals, params, request, url }) => {
 export const DELETE: RequestHandler = async ({ locals, params }) => {
   try {
     const { orgId, userId, role } = requireOrgRole(locals, params.org_id, 'member');
-    const existing = getDashboard(orgId, params.uid!);
+    const existing = getDashboardMeta(orgId, params.uid!);
     if (!existing) throw new DashboardNotFoundError();
     if (existing.createdBy !== userId && !roleAtLeast(role, 'admin')) {
       return json({ error: 'Forbidden' }, { status: 403 });

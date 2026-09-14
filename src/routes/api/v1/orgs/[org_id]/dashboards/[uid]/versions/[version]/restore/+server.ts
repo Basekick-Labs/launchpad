@@ -3,7 +3,7 @@ import type { RequestHandler } from './$types';
 import { requireOrgRole } from '$lib/server/orgAccess';
 import {
   DashboardNotFoundError,
-  getDashboard,
+  getDashboardMeta,
   getVersionModelJson,
   restoreVersion,
 } from '$lib/server/dashboards';
@@ -33,12 +33,18 @@ export const POST: RequestHandler = async ({ locals, params, url }) => {
       return json({ error: 'Invalid version' }, { status: 400 });
     }
 
-    const expectedVersion = Number(url.searchParams.get('version'));
-    if (!Number.isInteger(expectedVersion) || expectedVersion < 1) {
-      return json({ error: 'A ?version= query parameter is required' }, { status: 400 });
+    // The path `version` is the one being restored; this is the caller's view
+    // of the CURRENT version, for the concurrency check. Two different numbers,
+    // so two different names.
+    const expectedVersion = parseVersionParam(url.searchParams.get('expectedVersion') ?? undefined);
+    if (Number.isNaN(expectedVersion)) {
+      return json(
+        { error: 'An ?expectedVersion= query parameter is required' },
+        { status: 400 },
+      );
     }
 
-    const existing = getDashboard(orgId, params.uid!);
+    const existing = getDashboardMeta(orgId, params.uid!);
     if (!existing) throw new DashboardNotFoundError();
     if (existing.createdBy !== userId && !roleAtLeast(role, 'admin')) {
       return json({ error: 'Forbidden' }, { status: 403 });

@@ -26,12 +26,25 @@ import { getDb } from './db';
 import { isInstanceRef, type Dashboard, type Panel, type Target } from '$lib/dashboard/model';
 import type { OrgScope } from '$lib/roles';
 
-/** An instance reference could not be resolved within the org. */
+/**
+ * An instance reference could not be resolved within the org.
+ *
+ * Never names the offending id: an error naming it confirms which of several
+ * guessed ids exists elsewhere, and puts it in the toast and the server log.
+ *
+ * `path` is only meaningful when the caller actually knows which reference
+ * failed — `resolveTargetInstance` does, `assertInstancesInOrg` does not
+ * (the validator hands it a deduplicated id set with the paths already
+ * discarded), so that one passes null and gets the generic message rather
+ * than a misleading one.
+ */
 export class InstanceNotInOrgError extends Error {
-  constructor(readonly path: string) {
-    // Names the PATH, never the id: an error naming the id confirms which of
-    // several guessed ids exists elsewhere, and puts it in the toast and log.
-    super(`Instance referenced at ${path} is not available in this organization`);
+  constructor(readonly path: string | null) {
+    super(
+      path
+        ? `Instance referenced at ${path} is not available in this organization`
+        : 'A referenced instance is not available in this organization',
+    );
     this.name = 'InstanceNotInOrgError';
   }
 }
@@ -76,7 +89,7 @@ export function assertInstancesInOrg(orgId: OrgScope, ids: readonly string[]): v
     .all(orgId, ...ids) as Array<{ id: string }>;
   const found = new Set(rows.map((r) => r.id));
   for (const id of ids) {
-    if (!found.has(id)) throw new InstanceNotInOrgError('instanceId');
+    if (!found.has(id)) throw new InstanceNotInOrgError(null);
   }
 }
 
@@ -168,7 +181,7 @@ function resolveId(
     return { id: selected, path };
   }
 
-  // model.ts documents that storage rejects an unset instance; a target with no
-  // instance at any level cannot be executed.
+  // Saving an unset instance is legal (see Dashboard.instanceId); executing a
+  // query against one is not. This is where that distinction is enforced.
   throw new InstanceNotInOrgError('instanceId');
 }
