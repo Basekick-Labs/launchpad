@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { toCsv, rowsFromObjects } from '$lib/csv';
+  import { downloadBlob } from '$lib/download';
   import { createEventDispatcher } from 'svelte';
   import { Button } from '$lib/components/ui/button';
   import * as Dialog from '$lib/components/ui/dialog';
@@ -48,47 +50,21 @@
         break;
     }
 
-    downloadFile(content, `logs-export-${Date.now()}.${extension}`, mimeType);
+    downloadBlob([content], `logs-export-${Date.now()}.${extension}`, mimeType);
     open = false;
     dispatch('exported', { format: selectedFormat, count: logs.length });
   }
 
   function convertToCSV(data: Record<string, unknown>[], cols: string[]): string {
     if (data.length === 0) return '';
-
-    // Use provided columns or extract from first row
-    const headers = cols.length > 0 ? cols : Object.keys(data[0]);
-
-    // Escape CSV values
-    const escapeCSV = (value: unknown): string => {
-      if (value === null || value === undefined) return '';
-      const str = typeof value === 'object' ? JSON.stringify(value) : String(value);
-      // Escape quotes and wrap in quotes if contains comma, quote, or newline
-      if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-        return `"${str.replace(/"/g, '""')}"`;
-      }
-      return str;
-    };
-
-    const headerRow = headers.map(escapeCSV).join(',');
-    const dataRows = data.map(row =>
-      headers.map(col => escapeCSV(row[col])).join(',')
-    );
-
-    return [headerRow, ...dataRows].join('\n');
+    // One implementation, in $lib/csv. The first-record-keys fallback is
+    // preserved deliberately: log records are heterogeneous, and widening it to
+    // a union of all keys would change every existing export.
+    const { columns, rows } = rowsFromObjects(data, cols);
+    return toCsv(columns, rows);
   }
 
-  function downloadFile(content: string, filename: string, mimeType: string) {
-    const blob = new Blob([content], { type: mimeType });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  }
+
 </script>
 
 <Dialog.Root bind:open>

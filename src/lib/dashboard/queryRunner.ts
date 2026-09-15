@@ -146,6 +146,12 @@ export interface TargetResult {
   error?: QueryError;
   /** Whether this target's rows came from the cache. */
   cached: boolean;
+  /**
+   * Wall-clock milliseconds for this target, including time spent queued behind
+   * the concurrency limit. A cache hit is ~0, which is why the inspector shows
+   * `cached` alongside it — an unlabelled 0ms reads as a broken timer.
+   */
+  durationMs: number;
 }
 
 export interface PanelResult {
@@ -396,6 +402,7 @@ export function createQueryRunner(opts: QueryRunnerOptions) {
     signal: AbortSignal,
   ): Promise<TargetResult> {
     const refId = target.refId;
+    const startedAt = performance.now();
 
     const ref = resolveInstanceRef(dashboard, panel, target, ctx.variables ?? {});
     if (!ref.ok) {
@@ -403,6 +410,7 @@ export function createQueryRunner(opts: QueryRunnerOptions) {
         refId,
         executedSql: '',
         cached: false,
+        durationMs: 0,
         error: unresolvedError(ref.reason, ref.path),
       };
     }
@@ -439,7 +447,9 @@ export function createQueryRunner(opts: QueryRunnerOptions) {
 
     if (!runOpts.noCache) {
       const hit = readCache(key);
-      if (hit) return { refId, executedSql, cached: true, frame: toFrame(hit, target) };
+      if (hit) {
+        return { refId, executedSql, cached: true, durationMs: 0, frame: toFrame(hit, target) };
+      }
     }
 
     const shared = share(key, (sig) =>
@@ -472,12 +482,24 @@ export function createQueryRunner(opts: QueryRunnerOptions) {
         shared.promise.then(resolve, reject);
       });
       writeCache(key, result);
-      return { refId, executedSql, cached: false, frame: toFrame(result, target) };
+      return {
+        refId,
+        executedSql,
+        cached: false,
+        durationMs: Math.round(performance.now() - startedAt),
+        frame: toFrame(result, target),
+      };
     } catch (err) {
       if (signal.aborted) throw err; // cancelled, not failed — surfaced by runPanel
       const error = classify(err);
       opts.onError?.(error, { panelId: panel.id, refId });
-      return { refId, executedSql, cached: false, error };
+      return {
+        refId,
+        executedSql,
+        cached: false,
+        durationMs: Math.round(performance.now() - startedAt),
+        error,
+      };
     } finally {
       if (onAbort) signal.removeEventListener('abort', onAbort);
       shared.release();
@@ -533,6 +555,7 @@ export function createQueryRunner(opts: QueryRunnerOptions) {
             refId: targets[i].refId,
             executedSql: '',
             cached: false,
+            durationMs: 0,
             error: cancelled ? undefined : classify(s.reason),
           },
     );
