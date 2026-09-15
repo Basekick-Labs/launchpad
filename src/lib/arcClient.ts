@@ -14,6 +14,41 @@ export interface QueryResult {
   truncationReason?: string;
 }
 
+/**
+ * A query that Arc, or the proxy in front of it, refused.
+ *
+ * Carries the STATUS, which a plain `Error` threw away. The dashboard query
+ * runner classifies on it: 401/403 is a permissions problem the user can act
+ * on, 404 means the instance is gone, a proxy 502 carries a message we wrote
+ * ourselves and can show verbatim, and a 4xx from Arc carries Arc's own
+ * complaint about the SQL. Collapsing those into one string forces the consumer
+ * to pattern-match on message text.
+ */
+export class ArcQueryError extends Error {
+  constructor(
+    readonly status: number,
+    readonly body: string,
+    options?: ErrorOptions,
+  ) {
+    super(`Query failed (${status}): ${body}`, options);
+    this.name = 'ArcQueryError';
+  }
+}
+
+/**
+ * Per-call options. Separate from the positional `database` argument so this
+ * can grow without another positional parameter.
+ */
+export interface QueryOptions {
+  /**
+   * Aborts the request. The dashboard query runner supersedes a panel's
+   * in-flight query when the time range changes, and without this the only way
+   * to do that is to let the response land and throw it away — which still
+   * costs Arc the query and the proxy the transfer.
+   */
+  signal?: AbortSignal;
+}
+
 export type StatementStatus = 'pending' | 'running' | 'success' | 'error';
 
 export interface StatementResult {
@@ -362,7 +397,7 @@ export class ArcClient {
    * @param sql - The SQL query to execute
    * @param database - Optional database name to set via x-arc-database header (preferred over database.table syntax)
    */
-  async query(sql: string, database?: string): Promise<QueryResult> {
+  async query(sql: string, database?: string, opts?: QueryOptions): Promise<QueryResult> {
     const startTime = performance.now();
 
     const headers: Record<string, string> = {
@@ -378,15 +413,26 @@ export class ArcClient {
     const response = await fetch(`${this.baseURL}/api/v1/query`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ sql })
+      body: JSON.stringify({ sql }),
+      signal: opts?.signal
     });
 
     if (!response.ok) {
       const error = await response.text();
-      throw new Error(`Query failed: ${error}`);
+      throw new ArcQueryError(response.status, error);
     }
 
-    const apiResponse = await response.json();
+    let apiResponse;
+    try {
+      apiResponse = await response.json();
+    } catch (err) {
+      // A 200 whose body does not parse. Reachable: the instance proxy commits
+      // the status before streaming, so an upstream failure mid-body arrives as
+      // a truncated 200 and lands here as a SyntaxError.
+      throw new ArcQueryError(response.status, 'Arc returned a malformed or truncated response', {
+        cause: err,
+      });
+    }
     const executionTime = performance.now() - startTime;
 
     return {
