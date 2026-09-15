@@ -450,6 +450,16 @@
     pointer-events: none;
   }
 
+  /*
+    Spans the header so the whole title bar is grabbable — but it paints AFTER
+    the slot, so anything interactive a panel puts in its header (the kebab
+    menu, an error badge) would be covered and unclickable.
+
+    The contract with PanelChrome: header controls sit in a `position: relative;
+    z-index: 1` cluster, which paints in the positive stacking step and so lands
+    above this. Do not give this handle a z-index; that would create a stacking
+    context and break the arrangement.
+  */
   .drag-handle {
     position: absolute;
     inset: 0 0 auto 0;

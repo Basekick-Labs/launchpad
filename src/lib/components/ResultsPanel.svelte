@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { toCsvChunks } from '$lib/csv';
+  import { downloadBlob } from '$lib/download';
   import { onMount, onDestroy } from 'svelte';
   import { Chart, CategoryScale, LinearScale, PointElement, LineElement, BarElement, LineController, BarController, Title, Tooltip, Legend } from 'chart.js';
   import type { QueryResult, StatementResult } from '$lib/arcClient';
@@ -248,20 +250,13 @@
 
   function exportAsCSV() {
     if (!currentResult) return;
-
-    const headers = currentResult.columns.join(',');
-    const rows = currentResult.rows.map(row =>
-      row.map(cell => {
-        const value = cell === null ? '' : String(cell);
-        // Escape quotes and wrap in quotes if contains comma
-        return value.includes(',') || value.includes('"') || value.includes('\n')
-          ? `"${value.replace(/"/g, '""')}"`
-          : value;
-      }).join(',')
+    // One implementation, in $lib/csv: this one did not escape headers, wrote
+    // the text "undefined" for undefined, and "[object Object]" for objects.
+    downloadBlob(
+      toCsvChunks(currentResult.columns, currentResult.rows, { bom: true }),
+      'query-results.csv',
+      'text/csv;charset=utf-8',
     );
-
-    const csv = [headers, ...rows].join('\n');
-    downloadFile(csv, 'query-results.csv', 'text/csv');
   }
 
   function exportAsJSON() {
@@ -276,7 +271,7 @@
     });
 
     const json = JSON.stringify(data, null, 2);
-    downloadFile(json, 'query-results.json', 'application/json');
+    downloadBlob([json], 'query-results.json', 'application/json');
   }
 
   function copyAsMarkdown() {
@@ -298,17 +293,6 @@
     });
   }
 
-  function downloadFile(content: string, filename: string, mimeType: string) {
-    const blob = new Blob([content], { type: mimeType });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }
 </script>
 
 <div class="flex h-full flex-col gap-4 p-6">
