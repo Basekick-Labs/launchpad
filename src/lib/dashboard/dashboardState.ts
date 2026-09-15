@@ -116,6 +116,22 @@ export function buildRunContext(args: {
  * Validated against the dashboard rather than trusted: a stale link naming a
  * deleted panel would otherwise render a blank page instead of the dashboard.
  */
+/**
+ * The panel to edit, or null.
+ *
+ * Gated on `editable` as well as existence: a viewer pasting `?editPanel=<id>`
+ * must get the dashboard, not the editor. The API enforces it independently on
+ * save — this stops the UI offering something that would 403.
+ */
+export function resolveEditPanel(
+  panels: readonly Panel[],
+  id: string | null,
+  editable: boolean,
+): Panel | null {
+  if (!editable) return null;
+  return resolveViewPanel(panels, id);
+}
+
 export function resolveViewPanel(panels: readonly Panel[], id: string | null): Panel | null {
   if (!id) return null;
   return panels.find((p) => p.id === id) ?? null;
