@@ -23,7 +23,8 @@
  */
 
 import { getDb } from './db';
-import { isInstanceRef, type Dashboard, type Panel, type Target } from '$lib/dashboard/model';
+import type { Dashboard, Panel, Target } from '$lib/dashboard/model';
+import { resolveInstanceRef } from '$lib/dashboard/instanceRef';
 import type { OrgScope } from '$lib/roles';
 
 /**
@@ -153,35 +154,22 @@ export function resolveTargetCredential(
   return { id: row.id, endpointUrl: row.endpoint_url, adminToken: row.admin_token };
 }
 
-/** target -> panel -> dashboard precedence, with `$variable` dereferenced. */
+/**
+ * target -> panel -> dashboard precedence, with `$variable` dereferenced.
+ *
+ * The precedence itself lives in `$lib/dashboard/instanceRef` so the client
+ * query runner resolves the SAME id this does. Two copies would drift, and the
+ * drift looks like a panel that validates against one instance and executes
+ * against another. This wrapper only maps the neutral result onto the error
+ * this module's callers already handle.
+ */
 function resolveId(
   dashboard: Dashboard,
   panel: Panel | null,
   target: Target | null,
   varValues: Readonly<Record<string, string>>,
 ): { id: string; path: string } {
-  const candidates: Array<[string | null | undefined, string]> = [
-    [target?.instanceId, 'target.instanceId'],
-    [panel?.instanceId, 'panel.instanceId'],
-    [dashboard.instanceId, 'instanceId'],
-  ];
-
-  for (const [raw, path] of candidates) {
-    if (!raw) continue;
-    if (!isInstanceRef(raw)) return { id: raw, path };
-
-    const name = raw.slice(1);
-    const declared = dashboard.variables.find((v) => v.name === name && v.type === 'instance');
-    if (!declared) throw new InstanceNotInOrgError(path);
-    const selected = varValues[name];
-    if (!selected) throw new InstanceNotInOrgError(path);
-    // The selected value is raw client input, and it goes into the same
-    // org-predicated query as any literal id. It gets no more trust for having
-    // arrived through a variable.
-    return { id: selected, path };
-  }
-
-  // Saving an unset instance is legal (see Dashboard.instanceId); executing a
-  // query against one is not. This is where that distinction is enforced.
-  throw new InstanceNotInOrgError('instanceId');
+  const result = resolveInstanceRef(dashboard, panel, target, varValues);
+  if (!result.ok) throw new InstanceNotInOrgError(result.path);
+  return { id: result.id, path: result.path };
 }

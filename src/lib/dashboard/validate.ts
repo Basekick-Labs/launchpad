@@ -44,6 +44,7 @@
  */
 
 import { z } from 'zod';
+import { durationToMs } from './duration';
 import {
   DATABASE_PATTERN,
   DURATION_PATTERN,
@@ -160,16 +161,9 @@ export function utf8Length(str: string): number {
   return bytes;
 }
 
-export function durationToMs(value: string): number | null {
-  const match = /^(\d+)(ms|s|m|h|d|w)$/.exec(value);
-  if (!match) return null;
-  const n = Number(match[1]);
-  if (!Number.isFinite(n)) return null;
-  const unit: Record<string, number> = {
-    ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000,
-  };
-  return n * unit[match[2]];
-}
+// Re-exported rather than reimplemented: client code needs this parser too and
+// must not import this module to get it (zod). See ./duration.
+export { durationToMs } from './duration';
 
 // ---------------------------------------------------------------------------
 // Primitives
