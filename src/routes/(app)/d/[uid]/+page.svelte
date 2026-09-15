@@ -53,6 +53,7 @@
   import { resolveTimezone } from '$lib/dashboard/macros';
   import { findSlot, toItems } from '$lib/dashboard/gridEngine';
   import { duplicatePanel } from '$lib/dashboard/panelState';
+  import { loadPanel } from '$lib/dashboard/panelRegistry';
   import { createPanel, type Dashboard, type Panel } from '$lib/dashboard/model';
   import type { PageData } from './$types';
 
@@ -87,6 +88,30 @@
   let ctx = buildRunContext({ orgId: data.record.orgId, from: 0, to: 0, timezone: 'UTC' });
   let results: Record<string, PanelResult> = {};
   let inFlight: Record<string, boolean> = {};
+  /**
+   * Per-panel VIEW state, owned here because PanelChrome unmounts its slot on
+   * every state change — component-local state would not survive, and series
+   * colours would shuffle whenever one was filtered out. Never dirties the
+   * dashboard.
+   */
+  let panelSlots: Record<string, Record<string, number>> = {};
+
+  /** Curried so the handler carries a type: `svelte:component` with a dynamic
+      `this` loses event typing, and an inline annotation is a parse error. */
+  function rememberSlots(panelId: string) {
+    return (e: CustomEvent<Record<string, number>>) => {
+      panelSlots = { ...panelSlots, [panelId]: e.detail };
+    };
+  }
+
+  /** Lazily loaded, so uPlot stays out of this route's chunk. */
+  const renderers: Record<string, unknown> = {};
+  async function ensureRenderer(type: string): Promise<void> {
+    if (type in renderers) return;
+    renderers[type] = await loadPanel(type as never);
+    // Reassign so the template re-renders once the chunk has arrived.
+    renderers[type] = renderers[type];
+  }
 
   const runner = createQueryRunner({ transport: createProxyTransport() });
 
@@ -408,7 +433,25 @@
       on:share={() => onShare(panel)}
       on:remove={() => onRemove(panel)}
       on:duplicate={() => onDuplicate(panel)}
-    />
+      let:result
+    >
+      {#await ensureRenderer(panel.type) then _}
+        {#if renderers[panel.type]}
+          <svelte:component
+        this={renderers[panel.type]}
+        {result}
+        fieldConfig={panel.fieldConfig}
+        from={ctx.from}
+        to={ctx.to}
+        timezone={ctx.timezone}
+        priorSlots={panelSlots[panel.id] ?? {}}
+        on:slots={rememberSlots(panel.id)}
+      />
+        {:else}
+          <p class="unsupported">No renderer for a “{panel.type}” panel yet.</p>
+        {/if}
+      {/await}
+    </PanelChrome>
   </DashboardGrid>
 {/if}
 
@@ -460,4 +503,8 @@
     color: hsl(var(--muted-foreground));
   }
   .fullscreen { height: calc(100vh - 8rem); }
+  .unsupported {
+    display: flex; height: 100%; align-items: center; justify-content: center;
+    font-size: 0.8125rem; color: hsl(var(--muted-foreground)); text-align: center;
+  }
 </style>
