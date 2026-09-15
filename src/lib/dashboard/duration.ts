@@ -42,9 +42,19 @@ export function durationToMs(value: string): number | null {
  * (`'now-7d'`), and a bare duration (`'7d'`). Returns the SPAN, not an instant.
  *
  * This is the narrow slice of Grafana's relative-range grammar that panel
- * overrides actually use. The full grammar — `now/d`, `now-1M/M`, snapping —
- * belongs to the time range store (#24), which owns the dashboard range. When
- * that lands, this should defer to it rather than grow a second parser.
+ * overrides actually use. The full grammar — snapping, chains, calendar units —
+ * now lives in `./timeRange`, which owns the dashboard range.
+ *
+ * The two parsers are NOT the same and should not be merged. This one returns a
+ * SPAN in milliseconds, for a value that becomes a DuckDB INTERVAL, which is why
+ * it rejects `M` and `y`: `M` is a month in Grafana and a minute in DuckDB, a
+ * factor of 43,200. `timeRange` returns INSTANTS, never touches an interval, and
+ * therefore supports the full calendar unit set.
+ *
+ * `Panel.timeFrom` is the one place the line blurs — it is a range override
+ * parsed here as a span. Migrating `effectiveBounds` to the range parser is
+ * tracked separately; doing it here would change panel-override semantics in a
+ * PR about the dashboard range.
  */
 export function durationToMsLoose(value: string): number | null {
   const trimmed = value.trim();

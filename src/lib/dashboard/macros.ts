@@ -38,6 +38,7 @@
  */
 
 import { DURATION_PATTERN } from './model';
+import { zoneOffsetSeconds } from './zone';
 
 // ---------------------------------------------------------------------------
 // Timestamps
@@ -106,57 +107,12 @@ const NON_IANA_NAMES = new Set(['Local', 'Factory', 'posixrules']);
 const MAX_CACHED_ZONES = 1000;
 const zoneCache = new Map<string, string>();
 
-/** One formatter per zone. Constructing these is the expensive part. */
-const offsetFormatters = new Map<string, Intl.DateTimeFormat>();
-
-function offsetFormatter(tz: string): Intl.DateTimeFormat {
-  let f = offsetFormatters.get(tz);
-  if (!f) {
-    f = new Intl.DateTimeFormat('en-US', {
-      timeZone: tz,
-      hourCycle: 'h23',
-      year: 'numeric',
-      month: 'numeric',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: 'numeric',
-      second: 'numeric',
-    });
-    if (offsetFormatters.size < MAX_CACHED_ZONES) offsetFormatters.set(tz, f);
-  }
-  return f;
-}
-
-/**
- * The zone's UTC offset in seconds at a given instant.
- *
- * Arithmetic on `formatToParts` rather than parsing a `longOffset` name. Both
- * agree to the second on every sub-hour zone, but this has no feature
- * dependency, needs no probe, and cannot be tripped by an engine that renders a
- * bare `GMT` instead of `GMT+00:00`.
- *
- * Throws (via the formatter) for an unknown zone — callers validate first.
- */
-function zoneOffsetSeconds(tz: string, at: Date): number {
-  const parts = offsetFormatter(tz).formatToParts(at);
-  const get = (type: string): number => {
-    const p = parts.find((x) => x.type === type);
-    return p ? Number(p.value) : 0;
-  };
-  // `hourCycle: 'h23'` still renders midnight as 24 in some engines.
-  const hour = get('hour') % 24;
-  const asUTC = Date.UTC(get('year'), get('month') - 1, get('day'), hour, get('minute'), get('second'));
-  // Whole seconds: the formatter has no sub-second field, so the instant's own
-  // milliseconds must not leak into the difference.
-  return Math.round((asUTC - Math.floor(at.getTime() / 1000) * 1000) / 1000);
-}
-
 /** Samples a year at a fortnight's spacing, as the Go original does. */
 function sampleOffsets(tz: string): number[] {
   const out: number[] = [];
   const base = Date.UTC(new Date().getUTCFullYear(), 0, 1);
   for (let d = 0; d < 365; d += 14) {
-    out.push(zoneOffsetSeconds(tz, new Date(base + d * 86_400_000)));
+    out.push(zoneOffsetSeconds(tz, base + d * 86_400_000));
   }
   return out;
 }
