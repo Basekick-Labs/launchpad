@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { PageData } from './$types';
-  import { invalidateAll } from '$app/navigation';
+  import { goto, invalidateAll } from '$app/navigation';
   import { toast } from 'svelte-sonner';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
@@ -45,11 +45,11 @@
       // The POST route validates a full model, so send one. instanceId is null
       // until a panel needs an instance — nothing forces a choice up front.
       const model = createDashboard({ title: 'New dashboard', instanceId: null });
-      await createDashboardRequest(org.id, model);
-      // #35 adds the dashboard view; until it exists, creating navigates
-      // nowhere and the new row simply appears at the top of the list.
-      await invalidateAll();
+      const created = await createDashboardRequest(org.id, model);
       toast.success('Dashboard created');
+      // Straight into the new dashboard: a fresh one has no panels, so leaving
+      // the user on the list gives them a row and no obvious next step.
+      await goto(`/d/${created.uid}`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to create dashboard');
     } finally {
@@ -129,7 +129,9 @@
         {#each filtered as dashboard (dashboard.uid)}
           <div class="flex items-center justify-between gap-4 p-4">
             <div class="min-w-0">
-              <p class="truncate font-medium">{dashboard.title}</p>
+              <a href="/d/{dashboard.uid}" class="truncate block font-medium hover:underline">
+                {dashboard.title}
+              </a>
               {#if dashboard.description}
                 <p class="truncate text-sm text-muted-foreground">{dashboard.description}</p>
               {/if}
