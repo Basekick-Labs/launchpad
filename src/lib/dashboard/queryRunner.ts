@@ -235,6 +235,30 @@ const DEFAULTS = { concurrency: 5, cacheTtlMs: 5_000, maxCacheEntries: 200 };
  * NUL-joined, not `|`-joined: one component is arbitrary SQL, and `||` is
  * DuckDB's concatenation operator, so a pipe delimiter is not injective.
  */
+/**
+ * The identity of a REQUEST — everything that determines which rows come back.
+ *
+ * Exported because the panel editor needs the same answer to decide whether an
+ * edit requires a new query or only a redraw, and a second definition would
+ * drift. The editor asks {@link panelRequestKeys}; `runTarget` builds it here.
+ */
+export function requestKey(
+  orgId: string,
+  instanceId: string,
+  database: string | undefined,
+  expandedSql: string,
+  bounds: { from: number; to: number },
+): string {
+  return cacheKey([
+    orgId,
+    instanceId,
+    database ?? '',
+    expandedSql,
+    String(bounds.from),
+    String(bounds.to),
+  ]);
+}
+
 function cacheKey(parts: readonly string[]): string {
   return parts.join(' ');
 }
@@ -420,7 +444,11 @@ export function createQueryRunner(opts: QueryRunnerOptions) {
     const interpolated = interpolate(target.sql, ctx.variables);
 
     const intervalMs = computeIntervalMs(bounds.to - bounds.from, {
-      maxDataPoints: runOpts.maxDataPoints,
+      // The rendered width wins when the caller knows it; otherwise the panel's
+      // stored budget. Reading only `runOpts` left `Panel.maxDataPoints` — a
+      // stored, validated field documented as feeding this very calculation —
+      // silently inert, so the panel editor's control would have done nothing.
+      maxDataPoints: runOpts.maxDataPoints ?? panel.maxDataPoints,
       panelInterval: panel.interval,
       minInterval: ctx.minInterval,
     });
@@ -436,14 +464,7 @@ export function createQueryRunner(opts: QueryRunnerOptions) {
     // change only how those rows are normalized, so they are deliberately
     // absent — which is why the cache stores the raw result and each target
     // normalizes its own frame.
-    const key = cacheKey([
-      ctx.orgId,
-      ref.id,
-      target.database ?? '',
-      executedSql,
-      String(bounds.from),
-      String(bounds.to),
-    ]);
+    const key = requestKey(ctx.orgId, ref.id, target.database, executedSql, bounds);
 
     if (!runOpts.noCache) {
       const hit = readCache(key);
@@ -746,4 +767,47 @@ function proxyErrorText(body: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Every request this panel would issue, as keys.
+ *
+ * The panel editor compares these across an edit: if they are unchanged, the
+ * rows cannot have changed and the edit is a redraw rather than a query.
+ *
+ * Deliberately a function of the WHOLE input — dashboard, panel, context and run
+ * options — because the expanded SQL moves with `panel.interval`,
+ * `maxDataPoints`, `timeFrom`, `timeShift`, the dashboard range and
+ * `minInterval`. Comparing `target.sql` alone silently misses all six: a user
+ * setting "Min interval 5m" would watch a preview that never changed and then
+ * save a panel that did.
+ *
+ * `null` for a target whose instance cannot be resolved — two unresolvable
+ * targets are not the same request, they are both no request at all.
+ */
+export function panelRequestKeys(
+  dashboard: Dashboard,
+  panel: Panel,
+  ctx: RunContext,
+  runOpts: RunPanelOptions = {},
+): Array<string | null> {
+  const bounds = effectiveBounds(panel, ctx);
+  const intervalMs = computeIntervalMs(bounds.to - bounds.from, {
+    maxDataPoints: runOpts.maxDataPoints ?? panel.maxDataPoints,
+    panelInterval: panel.interval,
+    minInterval: ctx.minInterval,
+  });
+  return panel.targets
+    .filter((t) => !t.hide && t.sql.trim() !== '')
+    .map((target) => {
+      const ref = resolveInstanceRef(dashboard, panel, target, ctx.variables ?? {});
+      if (!ref.ok) return null;
+      const executedSql = applyMacros(target.sql, {
+        from: new Date(bounds.from),
+        to: new Date(bounds.to),
+        intervalMs,
+        timezone: ctx.timezone,
+      });
+      return requestKey(ctx.orgId, ref.id, target.database, executedSql, bounds);
+    });
 }

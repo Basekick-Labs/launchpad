@@ -31,6 +31,12 @@ export function setViewPanel(search: URLSearchParams, id: string | null): string
   return next.toString();
 }
 
+/** The panel being edited, or null. */
+export function getEditPanel(search: URLSearchParams): string | null {
+  const value = search.get('editPanel');
+  return value && value.length > 0 ? value : null;
+}
+
 /** True when the page is in kiosk mode — `?kiosk` with or without a value. */
 export function isKiosk(search: URLSearchParams): boolean {
   return search.has('kiosk') && search.get('kiosk') !== 'false';
@@ -51,6 +57,7 @@ export interface DashboardParams {
   to?: string | null;
   refresh?: string | null;
   viewPanel?: string | null;
+  editPanel?: string | null;
   kiosk?: boolean | null;
 }
 
@@ -75,6 +82,7 @@ export function mergeDashboardParams(
   set('to', changes.to);
   set('refresh', changes.refresh);
   set('viewPanel', changes.viewPanel);
+  set('editPanel', changes.editPanel);
   if (changes.kiosk !== undefined) {
     if (changes.kiosk) next.set('kiosk', '1');
     else next.delete('kiosk');

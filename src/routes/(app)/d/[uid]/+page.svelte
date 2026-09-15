@@ -34,12 +34,14 @@
   import {
     applyResult,
     baselineOf,
+    resolveEditPanel,
     buildRunContext,
     canSave,
     isDirty,
     resolveViewPanel,
   } from '$lib/dashboard/dashboardState';
   import {
+    getEditPanel,
     getViewPanel,
     initialRange,
     initialRefresh,
@@ -53,6 +55,7 @@
   import { resolveTimezone } from '$lib/dashboard/macros';
   import { findSlot, toItems } from '$lib/dashboard/gridEngine';
   import { duplicatePanel } from '$lib/dashboard/panelState';
+  import { applyEdit, beginEdit } from '$lib/dashboard/panelEditor';
   import { loadPanel } from '$lib/dashboard/panelRegistry';
   import { createPanel, type Dashboard, type Panel } from '$lib/dashboard/model';
   import type { PageData } from './$types';
@@ -82,6 +85,52 @@
   );
 
   $: kiosk = isKiosk($page.url.searchParams);
+  $: editing = resolveEditPanel(dashboard.panels, getEditPanel($page.url.searchParams), editable);
+
+  /** The in-progress copy. Page-owned, so an editor remount does not lose it. */
+  let draft: Panel | null = null;
+  let editorComponent: unknown = null;
+
+  // Open and close follow the URL, so a link and browser Back both work.
+  $: if (editing && (!draft || draft.id !== editing.id)) {
+    draft = beginEdit(editing);
+    void loadEditor();
+  }
+  $: if (!editing && draft) draft = null;
+
+  async function loadEditor(): Promise<void> {
+    if (editorComponent) return;
+    // Lazy: this pulls CodeMirror, which is over a megabyte in the console
+    // route's chunk. A static import would land it on the dashboard route.
+    editorComponent = (await import('$lib/components/dashboard/PanelEditor.svelte')).default;
+  }
+
+  function openEditor(panel: Panel): void {
+    writeUrl({ editPanel: panel.id, viewPanel: null });
+  }
+
+  function applyDraft(next: Panel): void {
+    dashboard = { ...dashboard, panels: applyEdit(dashboard.panels, next) };
+    draft = null;
+    writeUrl({ editPanel: null });
+    // The edit may have changed the query, so re-run just this panel.
+    const updated = dashboard.panels.find((p) => p.id === next.id);
+    if (updated) void runPanel(updated, true);
+  }
+
+  /** Typed handlers: a dynamic `svelte:component` loses event typing. */
+  function onDraftApply(e: CustomEvent<Panel>): void {
+    applyDraft(e.detail);
+  }
+  function onDraftChange(e: CustomEvent<Panel>): void {
+    draft = e.detail;
+  }
+
+  function discardDraft(): void {
+    // Nothing to restore: the original was never touched.
+    draft = null;
+    writeUrl({ editPanel: null });
+  }
   $: viewPanel = resolveViewPanel(dashboard.panels, getViewPanel($page.url.searchParams));
 
   /** Resolved once per tick and RETAINED — see the runner's from/to contract. */
@@ -389,7 +438,20 @@
   {/if}
 {/if}
 
-{#if viewPanel}
+{#if draft && editorComponent}
+  <div class="editor-overlay">
+    <svelte:component
+      this={editorComponent}
+      {dashboard}
+      {draft}
+      {ctx}
+      {runner}
+      on:apply={onDraftApply}
+      on:discard={discardDraft}
+      on:change={onDraftChange}
+    />
+  </div>
+{:else if viewPanel}
   <!-- Exactly one PanelChrome, and the grid is NOT mounted. Rendering an
        overlay above a live grid would give the same panel id two instances,
        whose generations invalidate each other; filtering the grid's panels down
@@ -408,6 +470,7 @@
         writeUrl({ viewPanel: null });
       }}
       on:duplicate={() => onDuplicate(viewPanel)}
+      on:edit={() => openEditor(viewPanel)}
     />
   </div>
 {:else if dashboard.panels.length === 0}
@@ -433,6 +496,7 @@
       on:share={() => onShare(panel)}
       on:remove={() => onRemove(panel)}
       on:duplicate={() => onDuplicate(panel)}
+      on:edit={() => openEditor(panel)}
       let:result
     >
       {#await ensureRenderer(panel.type) then _}
@@ -459,7 +523,10 @@
   on:keydown={(e) => {
     if (e.key !== 'Escape') return;
     // Precedence: the grid and the panel chrome handle Escape for their own
-    // in-progress interactions, so this only acts on page-level modes.
+    // in-progress interactions, so this only acts on page-level modes. The
+    // editor is excluded deliberately — Escape there belongs to CodeMirror, and
+    // silently discarding a draft would be data loss.
+    if (draft) return;
     if (viewPanel) writeUrl({ viewPanel: null });
     else if (kiosk) writeUrl({ kiosk: false });
   }}
@@ -503,6 +570,7 @@
     color: hsl(var(--muted-foreground));
   }
   .fullscreen { height: calc(100vh - 8rem); }
+  .editor-overlay { height: calc(100vh - 8rem); }
   .unsupported {
     display: flex; height: 100%; align-items: center; justify-content: center;
     font-size: 0.8125rem; color: hsl(var(--muted-foreground)); text-align: center;
