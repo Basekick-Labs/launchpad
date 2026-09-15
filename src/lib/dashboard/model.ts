@@ -941,6 +941,27 @@ export function emptyFieldConfig(): FieldConfigSource {
   return { defaults: {} };
 }
 
+/**
+ * Reads `fieldConfig.defaults.custom` — the panel-type-specific display bag
+ * (line width, fill opacity, point size, draw style) — with defaults applied.
+ *
+ * The sibling of {@link panelOptions}, and shallow for the same reason: a deep
+ * merge walks attacker-controlled keys, and `target[k] ??= {}` on `__proto__`
+ * pollutes `Object.prototype` process-wide. Keep the bag FLAT so the shallow
+ * spread is the whole story — a nested default is replaced wholesale by a
+ * stored partial, silently dropping every key the stored object omits.
+ *
+ * Lives here rather than in a panel module because every panel type needs it.
+ */
+export function fieldCustom<T extends Record<string, unknown>>(
+  fieldConfig: FieldConfigSource | undefined,
+  defaults: T,
+): T {
+  const custom = fieldConfig?.defaults?.custom;
+  if (!custom || typeof custom !== 'object') return { ...defaults };
+  return { ...defaults, ...(custom as Partial<T>) };
+}
+
 export function createPanel(opts: {
   type: PanelType;
   gridPos: GridPos;
