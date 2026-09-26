@@ -46,28 +46,34 @@ export function detectLogFields(columns: string[]): LogFieldMapping {
  * Detects log field mappings using both column names and sample data values
  * This is more robust for tables with non-standard column names
  */
-export function detectLogFieldsWithData(columns: string[], sampleRow: unknown[]): LogFieldMapping {
+export function detectLogFieldsWithData(columns: string[], sampleData: unknown[] | unknown[][]): LogFieldMapping {
+  // Keep accepting a single row for existing callers/tests, while allowing
+  // callers with query results to provide several rows for timestamp detection.
+  const sampleRows = normalizeSampleRows(sampleData);
+  const sampleRow = sampleRows[0] || [];
+
   // First try name-based detection
   const nameBasedMapping = detectLogFields(columns);
 
   // Validate name-detected timestamp against sample data
   // This prevents false positives where column names match patterns but data type doesn't
-  if (nameBasedMapping.timestamp && sampleRow) {
+  if (nameBasedMapping.timestamp) {
     const timestampIndex = columns.indexOf(nameBasedMapping.timestamp);
     if (timestampIndex !== -1) {
-      const value = sampleRow[timestampIndex];
-      if (!isTimestampValue(value)) {
-        // Name matched but value is not a timestamp, clear it
+      const hasTimestampValue = sampleRows.some(row => isTimestampValue(row[timestampIndex]));
+      if (!hasTimestampValue) {
+        // Name matched but sampled values are not timestamps, clear it
         nameBasedMapping.timestamp = null;
       }
     }
   }
 
   // If timestamp wasn't found by name (or was invalidated), try to detect by value
-  if (!nameBasedMapping.timestamp && sampleRow) {
+  // across the available sample rows so one leading NULL or unlucky row does not
+  // decide the mapping for the whole table.
+  if (!nameBasedMapping.timestamp && sampleRows.length > 0) {
     for (let i = 0; i < columns.length; i++) {
-      const value = sampleRow[i];
-      if (isTimestampValue(value)) {
+      if (sampleRows.some(row => isTimestampValue(row[i]))) {
         nameBasedMapping.timestamp = columns[i];
         break;
       }
@@ -125,12 +131,22 @@ export function detectLogFieldsWithData(columns: string[], sampleRow: unknown[])
   return nameBasedMapping;
 }
 
+function normalizeSampleRows(sampleData: unknown[] | unknown[][]): unknown[][] {
+  if (sampleData.length === 0) return [];
+
+  // Query results are arrays of rows. Existing direct callers pass one row.
+  // Treat the input as multiple rows only when every top-level entry is a row.
+  return sampleData.every(entry => Array.isArray(entry))
+    ? sampleData as unknown[][]
+    : [sampleData as unknown[]];
+}
+
 /**
  * Checks if a value looks like a timestamp
  */
 function isTimestampValue(value: unknown): boolean {
   if (!value) return false;
-  const str = String(value);
+  const str = String(value).trim();
 
   // ISO 8601 format
   if (/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(str)) return true;
@@ -141,7 +157,11 @@ function isTimestampValue(value: unknown): boolean {
   // Common date formats
   if (/^\d{4}\/\d{2}\/\d{2}/.test(str)) return true;
 
-  // Try parsing as date
+  // Do not let Date's permissive parser coerce bare numeric-looking values
+  // such as "12" -> 2001-12-01 or "2026" -> 2026-01-01.
+  if (/^[+-]?\d+(?:\.\d+)?$/.test(str)) return false;
+
+  // Preserve the existing fallback for non-numeric date strings.
   const date = new Date(str);
   if (!isNaN(date.getTime()) && date.getFullYear() > 2000 && date.getFullYear() < 2100) {
     return true;

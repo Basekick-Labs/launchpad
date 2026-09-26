@@ -275,21 +275,21 @@
 
       const { database, table } = selectedTable;
 
-      // First, fetch a sample to detect fields
-      // Try with x-arc-database header first, fallback to database.table syntax
+      // Fetch a small sample so timestamp detection is not decided by one row.
+      // Try with x-arc-database header first, fallback to database.table syntax.
       let sampleResult;
       try {
-        sampleResult = await client.query(`SELECT * FROM ${table} LIMIT 1`, database);
+        sampleResult = await client.query(`SELECT * FROM ${table} LIMIT 20`, database);
       } catch {
         // Fallback to database.table syntax for backwards compatibility
-        sampleResult = await client.query(`SELECT * FROM ${database}.${table} LIMIT 1`);
+        sampleResult = await client.query(`SELECT * FROM ${database}.${table} LIMIT 20`);
       }
 
       if (sampleResult.columns) {
         columns = sampleResult.columns;
-        // Use enhanced detection with sample data for better field matching
-        const sampleRow = sampleResult.rows?.[0] || [];
-        fieldMapping = detectLogFieldsWithData(columns, sampleRow);
+        // Use enhanced detection with several sample rows for better field matching.
+        const sampleRows = sampleResult.rows?.slice(0, 20) || [];
+        fieldMapping = detectLogFieldsWithData(columns, sampleRows);
       }
 
       // Build and execute the filtered query
@@ -541,9 +541,9 @@
 
       if (result.columns) {
         columns = result.columns;
-        // Re-detect field mapping for custom query results
-        const sampleRow = result.rows?.[0] || [];
-        fieldMapping = detectLogFieldsWithData(columns, sampleRow);
+        // Re-detect field mapping across several custom-query result rows.
+        const sampleRows = result.rows?.slice(0, 20) || [];
+        fieldMapping = detectLogFieldsWithData(columns, sampleRows);
       }
 
       if (result.rows) {
