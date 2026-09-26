@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { isKiosk } from '$lib/dashboard/dashboardUrl';
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
   import { logout } from '$lib/cloudApi';
@@ -7,15 +6,16 @@
   import { Button } from '$lib/components/ui/button';
   import { invalidateAll } from '$app/navigation';
   import {
-    LayoutDashboard, BarChart3, Server, Users, Settings, LogOut, BookOpen, Building2, ChevronsUpDown
+    LayoutDashboard, Server, Users, Settings, LogOut, BookOpen, Building2, ChevronsUpDown
   } from 'lucide-svelte';
 
   export let data: any;
 
   $: currentPath = $page.url.pathname;
 
-  // Not startsWith: '/dashboards'.startsWith('/dashboard') is true, which would
-  // light up both nav entries at once.
+  // Match the exact path or a child path, not a bare startsWith: a startsWith
+  // prefix check would light up a nav entry for any sibling route that shares
+  // its prefix.
   function isActive(href: string, path: string): boolean {
     return path === href || path.startsWith(href + '/');
   }
@@ -25,7 +25,6 @@
 
   $: navItems = [
     { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { href: '/dashboards', label: 'Dashboards', icon: BarChart3 },
     { href: '/instances', label: 'Instances', icon: Server },
     { href: '/team', label: 'Team', icon: Users },
     ...(data.user?.is_operator ? [{ href: '/orgs', label: 'Orgs', icon: Building2 }] : []),
@@ -58,17 +57,10 @@
     await logout();
     goto('/login');
   }
-
-  $: kioskMode = isKiosk($page.url.searchParams);
 </script>
 
 <div class="flex h-screen bg-background">
   <!-- Sidebar -->
-  <!-- Kiosk hides the whole app frame for a wall display. It has to be decided
-       HERE: the sidebar is a parent of every page, so /d/[uid] cannot remove it
-       from inside. Reading $page.url works because the page writes the flag with
-       `goto` — shallow routing would never update it. -->
-  {#if !kioskMode}
   <aside class="flex w-60 flex-col border-r bg-card">
     <!-- Logo -->
     <div class="flex h-14 items-center gap-2 border-b px-4">
@@ -134,7 +126,6 @@
       </div>
     </div>
   </aside>
-  {/if}
 
   <!-- Main Content -->
   <main class="flex-1 overflow-auto">

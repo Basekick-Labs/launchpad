@@ -8,8 +8,8 @@ import { browser } from '$app/environment';
  * Tailwind handles the ordinary case: `dark:` variants resolve against the
  * `.dark` class and nothing needs to know which mode is active. Canvas does
  * not. A uPlot stroke, a heatmap cell, a threshold fill — those are literal
- * colour strings chosen in JS, and `$lib/dashboard/colors` needs to be told
- * which set to draw from.
+ * colour strings chosen in JS, and that code needs to be told which set to
+ * draw from.
  *
  * Three components already answer that question by calling
  * `document.documentElement.classList.contains('dark')` at draw time, each
