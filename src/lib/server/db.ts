@@ -36,6 +36,21 @@ export function getDb(): Database.Database {
   return db;
 }
 
+export function deleteOrganization(db: Database.Database, orgId: string): void {
+  const tx = db.transaction(() => {
+    // Instance events do not cascade, so remove them before their instances.
+    db.prepare(
+      'DELETE FROM instance_events WHERE instance_id IN (SELECT id FROM instances WHERE org_id = ?)',
+    ).run(orgId);
+    db.prepare('DELETE FROM instances WHERE org_id = ?').run(orgId);
+    db.prepare('DELETE FROM org_invitations WHERE org_id = ?').run(orgId);
+    db.prepare('DELETE FROM org_members WHERE org_id = ?').run(orgId);
+    db.prepare('DELETE FROM organizations WHERE id = ?').run(orgId);
+  });
+
+  tx();
+}
+
 // Fresh-install schema. Arc Launchpad creates its SQLite database on first
 // run; there is no upgrade path from older databases, so this is a single
 // flat set of CREATE TABLE statements rather than an incremental migration
