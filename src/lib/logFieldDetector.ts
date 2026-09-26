@@ -151,8 +151,9 @@ function isTimestampValue(value: unknown): boolean {
   // ISO 8601 format
   if (/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(str)) return true;
 
-  // Unix timestamp (10 or 13 digits)
-  if (/^\d{10,13}$/.test(str)) return true;
+  // Unix timestamps. Use BigInt before converting to milliseconds so
+  // microsecond and nanosecond values do not lose precision.
+  if (/^\d+$/.test(str) && isPlausibleEpoch(str)) return true;
 
   // Common date formats
   if (/^\d{4}\/\d{2}\/\d{2}/.test(str)) return true;
@@ -168,6 +169,28 @@ function isTimestampValue(value: unknown): boolean {
   }
 
   return false;
+}
+
+function isPlausibleEpoch(value: string): boolean {
+  const length = value.length;
+  let milliseconds: bigint;
+
+  if (length >= 10 && length <= 12) {
+    milliseconds = BigInt(value) * 1_000n;
+  } else if (length >= 13 && length <= 15) {
+    milliseconds = BigInt(value);
+  } else if (length >= 16 && length <= 18) {
+    milliseconds = BigInt(value) / 1_000n;
+  } else if (length >= 19 && length <= 21) {
+    milliseconds = BigInt(value) / 1_000_000n;
+  } else {
+    return false;
+  }
+
+  if (milliseconds > BigInt(Number.MAX_SAFE_INTEGER)) return false;
+
+  const date = new Date(Number(milliseconds));
+  return !Number.isNaN(date.getTime()) && date.getFullYear() > 2000 && date.getFullYear() < 2100;
 }
 
 /**

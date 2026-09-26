@@ -116,6 +116,8 @@ describe('detectLogFieldsWithData — validating names against values', () => {
     ['2026-01-01 00:00:00', 'SQL datetime with a space'],
     ['1767225600', 'unix seconds, 10 digits'],
     ['1767225600000', 'unix millis, 13 digits'],
+    ['1767225600000000', 'unix micros, 16 digits'],
+    ['1767225600000000000', 'unix nanos, 19 digits'],
     ['2026/01/01', 'slash-separated date'],
   ])('accepts %j as a timestamp value (%s)', (value) => {
     expect(detectLogFieldsWithData(['a'], [value]).timestamp).toBe('a');
@@ -130,6 +132,13 @@ describe('detectLogFieldsWithData — validating names against values', () => {
 
   it.each([[12], ['5'], ['2026'], [' 12 '], [-1], ['5.5']])(
     'rejects bare numeric-looking value %j as a timestamp (#54)',
+    (value) => {
+      expect(detectLogFieldsWithData(['a'], [value]).timestamp).toBeNull();
+    },
+  );
+
+  it.each([['9999999999999999'], ['9999999999999999999']])(
+    'rejects implausible high-precision epoch value %j',
     (value) => {
       expect(detectLogFieldsWithData(['a'], [value]).timestamp).toBeNull();
     },
