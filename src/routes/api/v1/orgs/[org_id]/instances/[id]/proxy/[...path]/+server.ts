@@ -32,13 +32,28 @@ const ALLOWED_RESPONSE_HEADERS = new Set([
 // IMPORTANT: each entry must correspond to a route Arc itself serves WITHOUT
 // `withAdminAuth`/`adminAuth`. Because the proxy injects the instance admin
 // token, Arc's own auth won't stop a member here — this list is the only gate.
-// Verified against Arc: GET databases (handleList, no admin), POST query +
-// GET measurements (readAuth), GET metrics* (no admin). `/api/v1/logs` is
-// deliberately EXCLUDED — Arc guards it with withAdminAuth (it leaks SQL,
-// internal IPs, and tokens), so it must remain owner/admin-only here too.
+// Verified against Arc: GET databases, GET databases/:name and GET
+// databases/:name/measurements (readAuth, and a per-database read check when
+// the server restricts reads per database), POST query + GET measurements
+// (readAuth), GET metrics* (no admin). `/api/v1/logs` is deliberately
+// EXCLUDED — Arc guards it with withAdminAuth (it leaks SQL, internal IPs,
+// and tokens), so it must remain owner/admin-only here too.
+//
+// Arc's three database listing routes previously carried NO middleware at
+// all; they now require read permission. That does not change this list —
+// readAuth is not adminAuth, so they stay member-reachable — but it does
+// change what a member can get back. The proxy forwards the instance's
+// stored token, so Arc answers with that token's reach: no stored token is
+// now a 401 where it used to be a 200, and a token Arc restricts to
+// particular databases gets a 403 on the list-everything route rather than a
+// filtered list (Arc refuses rather than filtering, matching SHOW
+// DATABASES). Both pass through to the caller with their own status and body
+// — see the non-2xx passthrough tests in `arcProxy.test.ts` — so a caller
+// can tell "re-authenticate" from "you are scoped, name a database" from
+// "no such database".
 const MEMBER_READ_PREFIXES = [
   'api/v1/query',        // SQL reads (Arc uses POST for query — see below)
-  'api/v1/databases',    // GET list only; POST create is adminAuth (blocked by method gate)
+  'api/v1/databases',    // GET list/get/measurements (readAuth); POST create is adminAuth (blocked by method gate)
   'api/v1/measurements',
   'api/v1/metrics',
   'api/v1/health',
