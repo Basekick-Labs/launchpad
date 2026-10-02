@@ -117,6 +117,8 @@ Common values (see [`helm/launchpad/values.yaml`](helm/launchpad/values.yaml) fo
 
 After signing in, add a connection with your Arc instance's endpoint URL (e.g. `http://localhost:8000`) and an admin token. Arc Launchpad verifies the connection and then lets you query and manage that instance.
 
+The token has to be an **admin** token, not a read-scoped one. Launchpad forwards it on every request, so Arc answers with that token's reach: a token Arc restricts to particular databases cannot enumerate them, and a token without read permission cannot query at all. Arc's refusals are passed back with their own status rather than flattened into a Launchpad error, so you see which one you hit.
+
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get a change from idea to merged, and browse [`good first issue`](https://github.com/Basekick-Labs/launchpad/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) for scoped work with a clear starting point.
