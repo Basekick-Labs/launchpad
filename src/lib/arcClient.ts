@@ -179,6 +179,7 @@ export interface ContinuousQuery {
   destination_measurement: string;
   query: string;
   interval: string;
+  tag_columns?: string[] | null;
   retention_days?: number | null;
   delete_source_after_days?: number | null;
   is_active: boolean;
@@ -198,9 +199,40 @@ export interface CreateContinuousQuery {
   destination_measurement: string;
   query: string;
   interval: string;
+  tag_columns?: string[];
   retention_days?: number;
   delete_source_after_days?: number;
   is_active?: boolean;
+}
+
+/**
+ * The subset of a stored continuous query that PUT accepts back.
+ *
+ * Arc replaces the whole definition on update: it requires name, database,
+ * both measurements, query and interval, and overwrites description,
+ * tag_columns, retention_days, delete_source_after_days and is_active with
+ * whatever the body carries (arc#993, arc#1011). So a caller changing one
+ * field has to send everything else as it stands, and this is the one place
+ * that knows what "everything else" is. Optional fields are omitted rather
+ * than sent as null, which clears them server side either way but keeps the
+ * body the same shape the create form sends.
+ */
+export function continuousQueryDefinition(query: ContinuousQuery): CreateContinuousQuery {
+  return {
+    name: query.name,
+    database: query.database,
+    source_measurement: query.source_measurement,
+    destination_measurement: query.destination_measurement,
+    query: query.query,
+    interval: query.interval,
+    is_active: query.is_active,
+    ...(query.description ? { description: query.description } : {}),
+    ...(query.tag_columns ? { tag_columns: query.tag_columns } : {}),
+    ...(query.retention_days ? { retention_days: query.retention_days } : {}),
+    ...(query.delete_source_after_days
+      ? { delete_source_after_days: query.delete_source_after_days }
+      : {})
+  };
 }
 
 export interface CQExecution {
@@ -726,7 +758,14 @@ export class ArcClient {
     return response.json();
   }
 
-  async updateContinuousQuery(id: number, cq: Partial<CreateContinuousQuery>): Promise<ContinuousQuery> {
+  /**
+   * PUT replaces the whole definition: Arc requires name, database, both
+   * measurements, query and interval in the body, and overwrites the optional
+   * fields with whatever it carries — so a partial body is either refused or
+   * silently blanks stored columns (arc#993, arc#1011). The parameter is a
+   * complete CreateContinuousQuery for that reason, not a Partial.
+   */
+  async updateContinuousQuery(id: number, cq: CreateContinuousQuery): Promise<ContinuousQuery> {
     const response = await fetch(`${this.baseURL}/api/v1/continuous_queries/${id}`, {
       method: 'PUT',
       headers: {
