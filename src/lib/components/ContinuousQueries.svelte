@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { ArcClient, ContinuousQuery, CQExecution, CQExecuteResult, CreateContinuousQuery } from '$lib/arcClient';
+  import { continuousQueryDefinition } from '$lib/arcClient';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
   import { Label } from '$lib/components/ui/label';
@@ -282,6 +283,12 @@ ORDER BY 1`;
       if (formDeleteSourceAfterDays && Number(formDeleteSourceAfterDays) > 0) {
         queryData.delete_source_after_days = Number(formDeleteSourceAfterDays);
       }
+      // Not editable here, and PUT overwrites it, so carry the stored value
+      // through or saving an edit drops the metadata compaction uses to dedup
+      // this query's output (arc#521).
+      if (editingQuery?.tag_columns) {
+        queryData.tag_columns = editingQuery.tag_columns;
+      }
 
       if (editingQuery) {
         await client.updateContinuousQuery(editingQuery.id, queryData);
@@ -342,7 +349,14 @@ ORDER BY 1`;
 
   async function toggleQueryActive(query: ContinuousQuery) {
     try {
-      await client.updateContinuousQuery(query.id, { is_active: !query.is_active });
+      // PUT replaces the whole definition, so send the one we already hold
+      // with is_active flipped. A body carrying only is_active is refused
+      // outright, and before Arc required these fields it blanked the columns
+      // it did not carry (arc#993, arc#1011).
+      await client.updateContinuousQuery(query.id, {
+        ...continuousQueryDefinition(query),
+        is_active: !query.is_active
+      });
       toast.success(query.is_active ? 'Query paused' : 'Query activated');
       loadQueries();
     } catch (err) {
