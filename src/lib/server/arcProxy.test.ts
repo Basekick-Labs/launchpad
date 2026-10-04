@@ -348,3 +348,95 @@ describe('streamUpstreamWithFallback', () => {
     ).rejects.toBeTruthy();
   });
 });
+
+// ===========================================================================
+// Non-2xx passthrough
+// ===========================================================================
+
+describe('non-2xx passthrough', () => {
+  // Arc's three database listing routes (GET /api/v1/databases, /:name and
+  // /:name/measurements) used to carry no authentication at all. They now
+  // require read permission, and a per-database read check where the server
+  // restricts reads per database, so they answer with statuses this proxy
+  // never used to see from them:
+  //
+  //   401 — no stored token, or one Arc rejected: re-authenticate
+  //   403 — the token lacks read permission, OR it may read but not that
+  //         database. The two 403s have different bodies and mean different
+  //         things; only the second is resolved by naming a database, and Arc
+  //         will never answer the list-everything route with a filtered list.
+  //   404 — no such database
+  //
+  // The proxy must not flatten those into one failure: it forwards the
+  // upstream status and the body verbatim so the caller can tell them apart.
+  // A 502 is reserved for the proxy's own failures (unreachable instance,
+  // oversized response), and turning an upstream 403 into one would report a
+  // scoped token as a Launchpad fault.
+  const arcAnswers = [
+    { status: 401, body: '{"success":false,"error":"Authentication required"}' },
+    { status: 401, body: '{"success":false,"error":"Invalid or expired token"}' },
+    { status: 403, body: '{"success":false,"error":"Permission denied: read required"}' },
+    { status: 403, body: `{"error":"access denied: no read permission for database '*'"}` },
+    { status: 403, body: `{"error":"access denied: no read permission for database 'metrics'"}` },
+    { status: 404, body: `{"error":"Database 'ghost' not found"}` },
+    { status: 200, body: '{"databases":[{"name":"metrics","measurement_count":2}],"count":1}' },
+  ];
+
+  for (const answer of arcAnswers) {
+    it(`forwards HTTP ${answer.status} and its body unchanged (${answer.body.slice(0, 48)}…)`, async () => {
+      const port = await upstream((_req, res) => {
+        res.writeHead(answer.status, {
+          'content-type': 'application/json',
+          'content-length': String(Buffer.byteLength(answer.body)),
+        });
+        res.end(answer.body);
+      });
+
+      const result = await call(port, { path: 'api/v1/databases' });
+
+      expect(result.status).toBe(answer.status);
+      expect(result.headers['content-type']).toBe('application/json');
+
+      let received = '';
+      if (result.body) {
+        for await (const chunk of result.body as unknown as AsyncIterable<Uint8Array>) {
+          received += Buffer.from(chunk).toString('utf8');
+        }
+      }
+      expect(received).toBe(answer.body);
+    });
+  }
+
+  it('does not retry a 403 against the next IP', async () => {
+    // A refusal is a decision, not a transport failure: Arc answers an
+    // identical request identically, so a second attempt only doubles the
+    // load and the audit noise.
+    let requests = 0;
+    const port = await upstream((_req, res) => {
+      requests++;
+      const body = `{"error":"access denied: no read permission for database '*'"}`;
+      res.writeHead(403, {
+        'content-type': 'application/json',
+        'content-length': String(Buffer.byteLength(body)),
+      });
+      res.end(body);
+    });
+
+    const result = await streamUpstreamWithFallback(
+      {
+        method: 'GET',
+        resolved: target(port),
+        hostHeader: `localhost:${port}`,
+        path: 'api/v1/databases',
+        headers: {},
+        body: null,
+        headerTimeoutMs: 1500,
+      },
+      ['127.0.0.1', '127.0.0.1'],
+    );
+
+    expect(result.status).toBe(403);
+    expect(requests).toBe(1);
+    await drain(result.body);
+  });
+});
