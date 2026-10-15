@@ -1,3 +1,4 @@
+import { readBoundedJsonBody } from '$lib/server/util';
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { v4 as uuidv4 } from 'uuid';
@@ -29,7 +30,7 @@ export const POST: RequestHandler = async ({ locals, request }) => {
     return json({ error: 'Forbidden' }, { status: 403 });
   }
 
-  const { name, owner_user_id } = await request.json();
+  const { name, owner_user_id } = await readBoundedJsonBody(request);
   if (!name || typeof name !== 'string' || !name.trim()) {
     return json({ error: 'Organization name is required' }, { status: 400 });
   }

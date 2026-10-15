@@ -40,6 +40,8 @@ spec:
               value: {{ .Values.service.targetPort | quote }}
             - name: NODE_ENV
               value: "production"
+            - name: BODY_SIZE_LIMIT
+              value: {{ .Values.requestBodySizeLimit | quote }}
             - name: LAUNCHPAD_DB_PATH
               value: {{ printf "%s/launchpad.db" .Values.persistence.mountPath | quote }}
             - name: LAUNCHPAD_BASE_URL
