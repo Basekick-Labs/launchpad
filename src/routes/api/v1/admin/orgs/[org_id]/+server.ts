@@ -1,3 +1,4 @@
+import { readBoundedJsonBody } from '$lib/server/util';
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
@@ -14,7 +15,7 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
     return json({ error: 'Organization not found' }, { status: 404 });
   }
 
-  const { name } = await request.json();
+  const { name } = await readBoundedJsonBody(request);
   if (!name || typeof name !== 'string' || !name.trim()) {
     return json({ error: 'Organization name is required' }, { status: 400 });
   }

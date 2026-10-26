@@ -1,3 +1,4 @@
+import { readBoundedJsonBody } from '$lib/server/util';
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
@@ -22,7 +23,7 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
     return json({ error: 'User not found' }, { status: 404 });
   }
 
-  const body = await request.json();
+  const body = await readBoundedJsonBody(request);
   const changes: Record<string, unknown> = {};
 
   // Toggle admin (is_operator)

@@ -1,3 +1,4 @@
+import { readBoundedJsonBody } from '$lib/server/util';
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
@@ -35,7 +36,7 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
     return json({ error: 'Forbidden' }, { status: 403 });
   }
 
-  const body = await request.json();
+  const body = await readBoundedJsonBody(request);
   const allowed = ['name', 'query', 'condition', 'threshold', 'check_interval', 'webhook_url', 'enabled'];
   const updates = Object.fromEntries(Object.entries(body).filter(([k]) => allowed.includes(k)));
 

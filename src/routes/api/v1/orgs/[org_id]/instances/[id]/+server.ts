@@ -1,3 +1,4 @@
+import { readBoundedJsonBody } from '$lib/server/util';
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
@@ -48,7 +49,7 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
     return json({ error: 'Instance not found' }, { status: 404 });
   }
 
-  const { name, endpoint_url, admin_token } = await request.json();
+  const { name, endpoint_url, admin_token } = await readBoundedJsonBody(request);
 
   try {
     const updated = await updateInstanceConnection(params.id, {

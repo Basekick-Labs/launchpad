@@ -40,6 +40,7 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | Variable | Purpose |
 |---|---|
 | `LAUNCHPAD_JWT_SECRET` | Secret used to sign session tokens. **The app refuses to start in production without it.** Generate one with `openssl rand -hex 32`. |
+| `BODY_SIZE_LIMIT` | adapter-node's declared-length limit. Docker and Helm set `268435456` (256 MiB); JSON API routes separately enforce a 1 MiB streaming limit. |
 
 Email (Mailgun), signup CAPTCHA (Cloudflare Turnstile), ops alerting (Google Chat), and Google OAuth are all **optional** — without them, those features are simply skipped (e.g. emails print to the console instead of being sent).
 
@@ -59,7 +60,7 @@ Without it, registering (or health-checking) a private Arc endpoint fails with a
 
 ```bash
 npm run build
-LAUNCHPAD_JWT_SECRET=$(openssl rand -hex 32) node build
+BODY_SIZE_LIMIT=268435456 LAUNCHPAD_JWT_SECRET=$(openssl rand -hex 32) node build
 ```
 
 The server listens on `$PORT` (default `3000`).
@@ -110,6 +111,7 @@ Common values (see [`helm/launchpad/values.yaml`](helm/launchpad/values.yaml) fo
 | `jwtSecret` | `""` | **Required** unless `existingSecret` is set. Signs session tokens. |
 | `existingSecret` | `""` | Name of a pre-created Secret holding `LAUNCHPAD_JWT_SECRET` instead. |
 | `baseUrl` | `http://localhost:3000` | Public URL (email links + passkey origin). |
+| `requestBodySizeLimit` | `268435456` | adapter-node's declared-length limit in bytes. JSON API routes enforce a separate 1 MiB limit. |
 | `persistence.size` | `1Gi` | PVC size for the SQLite database. |
 | `ingress.enabled` | `false` | Enable to expose via an Ingress. |
 

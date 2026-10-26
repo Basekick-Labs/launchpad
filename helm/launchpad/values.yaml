@@ -12,6 +12,10 @@ fullnameOverride: ""
 
 replicaCount: 1
 
+# adapter-node's declared-length limit. JSON endpoints apply a separate 1 MiB
+# streaming cap, including chunked requests without Content-Length.
+requestBodySizeLimit: "268435456"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Required: the secret used to sign session tokens.
 # Provide ONE of:

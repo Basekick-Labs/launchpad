@@ -1,3 +1,4 @@
+import { readBoundedJsonBody } from '$lib/server/util';
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import crypto from 'crypto';
@@ -47,7 +48,7 @@ export const POST: RequestHandler = async ({ locals, params, request, url }) => 
     return json({ error: 'Organization not found' }, { status: 404 });
   }
 
-  const { email, role } = await request.json();
+  const { email, role } = await readBoundedJsonBody(request);
   if (!email || typeof email !== 'string' || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return json({ error: 'Valid email is required' }, { status: 400 });
   }

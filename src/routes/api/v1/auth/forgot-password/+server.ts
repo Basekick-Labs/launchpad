@@ -1,3 +1,4 @@
+import { readBoundedJsonBody } from '$lib/server/util';
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
@@ -5,7 +6,7 @@ import { sendPasswordResetEmail } from '$lib/server/email';
 import { isRateLimited } from '$lib/server/ratelimit';
 
 export const POST: RequestHandler = async ({ request }) => {
-  const { email } = await request.json();
+  const { email } = await readBoundedJsonBody(request);
 
   if (!email) {
     return json({ error: 'Email is required' }, { status: 400 });
