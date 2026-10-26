@@ -151,8 +151,8 @@ function isTimestampValue(value: unknown): boolean {
   // ISO 8601 format
   if (/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(str)) return true;
 
-  // Unix timestamps. Use BigInt before converting to milliseconds so
-  // microsecond and nanosecond values do not lose precision.
+  // Compare epoch values exactly; converting nanoseconds through Number
+  // would round away precision before checking the plausibility bounds.
   if (/^\d+$/.test(str) && isPlausibleEpoch(str)) return true;
 
   // Common date formats
@@ -172,25 +172,21 @@ function isTimestampValue(value: unknown): boolean {
 }
 
 function isPlausibleEpoch(value: string): boolean {
-  const length = value.length;
-  let milliseconds: bigint;
+  const significantDigits = value.replace(/^0+/, '');
+  // Even nanoseconds before 2100 fit in 19 digits. Bound BigInt parsing
+  // without using digit count to select a unit, and allow leading zeros.
+  if (significantDigits.length === 0 || significantDigits.length > 19) return false;
 
-  if (length >= 10 && length <= 12) {
-    milliseconds = BigInt(value) * 1_000n;
-  } else if (length >= 13 && length <= 15) {
-    milliseconds = BigInt(value);
-  } else if (length >= 16 && length <= 18) {
-    milliseconds = BigInt(value) / 1_000n;
-  } else if (length >= 19 && length <= 21) {
-    milliseconds = BigInt(value) / 1_000_000n;
-  } else {
-    return false;
-  }
+  const epoch = BigInt(significantDigits);
+  const startOf2001 = 978307200n;
+  const startOf2100 = 4102444800n;
 
-  if (milliseconds > BigInt(Number.MAX_SAFE_INTEGER)) return false;
-
-  const date = new Date(Number(milliseconds));
-  return !Number.isNaN(date.getTime()) && date.getFullYear() > 2000 && date.getFullYear() < 2100;
+  // Seconds, milliseconds, microseconds and nanoseconds have disjoint
+  // plausible ranges. Compare the original integer without truncation,
+  // using UTC bounds so detection never depends on the browser's timezone.
+  return [1n, 1_000n, 1_000_000n, 1_000_000_000n].some(
+    scale => epoch >= startOf2001 * scale && epoch < startOf2100 * scale,
+  );
 }
 
 /**

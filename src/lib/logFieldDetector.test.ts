@@ -144,6 +144,50 @@ describe('detectLogFieldsWithData — validating names against values', () => {
     },
   );
 
+  describe.each([
+    ['seconds', '978307200', '4102444800'],
+    ['milliseconds', '978307200000', '4102444800000'],
+    ['microseconds', '978307200000000', '4102444800000000'],
+    ['nanoseconds', '978307200000000000', '4102444800000000000'],
+  ])('UTC epoch plausibility in %s', (_unit, minimum, maximum) => {
+    // The bounds are 2001-01-01 and 2100-01-01 in UTC. Check exact
+    // neighboring integers, including sub-millisecond values, as strings
+    // and bigint so Number rounding cannot weaken the boundary assertions.
+    it.each([
+      ['before 2001', BigInt(minimum) - 1n, false],
+      ['start of 2001', BigInt(minimum), true],
+      ['before 2100', BigInt(maximum) - 1n, true],
+      ['start of 2100', BigInt(maximum), false],
+    ] as const)('checks %s', (_boundary, epoch, accepted) => {
+      for (const type of ['string', 'bigint']) {
+        const value = type === 'string' ? epoch.toString() : epoch;
+        expect(detectLogFieldsWithData(['observed'], [value]).timestamp).toBe(accepted ? 'observed' : null);
+      }
+    });
+  });
+
+  it.each([
+    '1767225600',
+    '1767225600000',
+    '1767225600000000',
+    '1767225600000000000',
+  ])('accepts a 2026 epoch %s across input representations', (epoch) => {
+    for (const value of [epoch, BigInt(epoch), Number(epoch), `0000${epoch}`]) {
+      expect(detectLogFieldsWithData(['observed'], [value]).timestamp).toBe('observed');
+    }
+  });
+
+  it.each([
+    '123456789012',
+    '946684800',
+    '946684800000',
+    '946684800000000',
+    '946684800000000000',
+    '999999999999999999999999999999',
+  ])('rejects implausible epoch or counter %s', (value) => {
+    expect(detectLogFieldsWithData(['observed'], [value]).timestamp).toBeNull();
+  });
+
   it.each([['ERROR'], ['warn'], ['Info'], ['DEBUG'], ['TRACE'], ['FATAL'], ['CRITICAL']])(
     'accepts %j as a level value',
     (value) => {
