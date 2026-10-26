@@ -147,6 +147,16 @@ export interface CreateRetentionPolicy {
   is_active?: boolean;
 }
 
+export type UpdateRetentionPolicy = Omit<CreateRetentionPolicy, 'measurement'> & {
+  measurement?: string | null;
+};
+
+export function retentionPolicyEditFields(
+  measurement: string
+): Pick<UpdateRetentionPolicy, 'measurement'> {
+  return { measurement: measurement || null };
+}
+
 export interface RetentionExecution {
   id: number;
   policy_id: number;
@@ -205,17 +215,34 @@ export interface CreateContinuousQuery {
   is_active?: boolean;
 }
 
+export type UpdateContinuousQuery = Omit<
+  CreateContinuousQuery,
+  'description' | 'retention_days' | 'delete_source_after_days'
+> & {
+  description?: string | null;
+  retention_days?: number | null;
+  delete_source_after_days?: number | null;
+};
+
+export function continuousQueryEditFields(
+  description: string,
+  retentionDays: number | null,
+  deleteSourceAfterDays: number | null
+): Pick<UpdateContinuousQuery, 'description' | 'retention_days' | 'delete_source_after_days'> {
+  return {
+    description: description.trim() || null,
+    retention_days: retentionDays && retentionDays > 0 ? Number(retentionDays) : null,
+    delete_source_after_days:
+      deleteSourceAfterDays && deleteSourceAfterDays > 0 ? Number(deleteSourceAfterDays) : null
+  };
+}
+
 /**
- * The subset of a stored continuous query that PUT accepts back.
- *
- * Arc replaces the whole definition on update: it requires name, database,
- * both measurements, query and interval, and overwrites description,
- * tag_columns, retention_days, delete_source_after_days and is_active with
- * whatever the body carries (arc#993, arc#1011). So a caller changing one
- * field has to send everything else as it stands, and this is the one place
- * that knows what "everything else" is. Optional fields are omitted rather
- * than sent as null, which clears them server side either way but keeps the
- * body the same shape the create form sends.
+ * The definition fields to send when updating a stored continuous query.
+ * Older Arc versions require the complete definition on PUT, so callers
+ * changing one field send everything else as it stands. Optional values that
+ * are already unset are omitted; current Arc versions preserve those values,
+ * while older replacement-style versions clear them.
  */
 export function continuousQueryDefinition(query: ContinuousQuery): CreateContinuousQuery {
   return {
@@ -635,7 +662,7 @@ export class ArcClient {
     return response.json();
   }
 
-  async updateRetentionPolicy(id: number, policy: Partial<CreateRetentionPolicy>): Promise<RetentionPolicy> {
+  async updateRetentionPolicy(id: number, policy: Partial<UpdateRetentionPolicy>): Promise<RetentionPolicy> {
     const response = await fetch(`${this.baseURL}/api/v1/retention/${id}`, {
       method: 'PUT',
       headers: {
@@ -759,13 +786,11 @@ export class ArcClient {
   }
 
   /**
-   * PUT replaces the whole definition: Arc requires name, database, both
-   * measurements, query and interval in the body, and overwrites the optional
-   * fields with whatever it carries — so a partial body is either refused or
-   * silently blanks stored columns (arc#993, arc#1011). The parameter is a
-   * complete CreateContinuousQuery for that reason, not a Partial.
+   * Send the full definition for compatibility with older Arc versions that
+   * require it. Newer versions apply fields present in the body and preserve
+   * fields left out; nullable optional values can be sent to clear them.
    */
-  async updateContinuousQuery(id: number, cq: CreateContinuousQuery): Promise<ContinuousQuery> {
+  async updateContinuousQuery(id: number, cq: UpdateContinuousQuery): Promise<ContinuousQuery> {
     const response = await fetch(`${this.baseURL}/api/v1/continuous_queries/${id}`, {
       method: 'PUT',
       headers: {

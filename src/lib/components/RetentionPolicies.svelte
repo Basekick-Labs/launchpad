@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { retentionPolicyEditFields } from '$lib/arcClient';
   import type { ArcClient, RetentionPolicy, RetentionExecution, RetentionExecuteResult, CreateRetentionPolicy } from '$lib/arcClient';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
@@ -227,7 +228,10 @@
       }
 
       if (editingPolicy) {
-        await client.updateRetentionPolicy(editingPolicy.id, policyData);
+        await client.updateRetentionPolicy(editingPolicy.id, {
+          ...policyData,
+          ...retentionPolicyEditFields(formMeasurement)
+        });
         toast.success('Retention policy updated');
       } else {
         await client.createRetentionPolicy(policyData);

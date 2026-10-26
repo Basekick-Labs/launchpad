@@ -1,11 +1,43 @@
 import { describe, expect, it } from 'vitest';
-import { continuousQueryDefinition, type ContinuousQuery } from './arcClient';
+import {
+	continuousQueryDefinition,
+	continuousQueryEditFields,
+	retentionPolicyEditFields,
+	type ContinuousQuery
+} from './arcClient';
+
+describe('continuousQueryEditFields (Arc #93)', () => {
+	// Arc 27.01.1 preserves omitted values on PUT, so a cleared field must be sent as null.
+	it('sends null for optional fields cleared in the edit form', () => {
+		expect(continuousQueryEditFields('', null, null)).toEqual({
+			description: null,
+			retention_days: null,
+			delete_source_after_days: null
+		});
+	});
+
+	it('preserves non-empty edit values', () => {
+		expect(continuousQueryEditFields('  hourly rollup  ', 30, 7)).toEqual({
+			description: 'hourly rollup',
+			retention_days: 30,
+			delete_source_after_days: 7
+		});
+	});
+});
+
+describe('retentionPolicyEditFields (Arc #93)', () => {
+	it('sends null when the edit form switches to all measurements', () => {
+		expect(retentionPolicyEditFields('')).toEqual({ measurement: null });
+	});
+
+	it('preserves a selected measurement', () => {
+		expect(retentionPolicyEditFields('cpu')).toEqual({ measurement: 'cpu' });
+	});
+});
 
 /**
- * PUT /api/v1/continuous_queries/:id replaces the stored definition, so a
- * partial body is either refused (arc#993, arc#1011 made six fields required)
- * or silently zeroes the columns it leaves out. Pausing a query used to send
- * `{ is_active }` alone, which is exactly that shape.
+ * Older Arc versions require key definition fields on PUT. The toggle helper
+ * sends the stored definition for compatibility with those versions.
  */
 describe('continuousQueryDefinition', () => {
 	const stored: ContinuousQuery = {
