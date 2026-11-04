@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { formatTopicMapping, parseTopicMapping } from '$lib/mqttTopicMapping';
   import type {
     ArcClient,
     MqttSubscription,
@@ -7,6 +8,7 @@
     MqttHealth,
     CreateMqttSubscription,
     UpdateMqttSubscription,
+    MqttTopicMapping,
   } from '$lib/arcClient';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
@@ -71,7 +73,8 @@
   let fTlsKeyPath = '';
   let fTlsCaPath = '';
   let fTlsInsecure = false;
-  let fTopicMapping = ''; // "topic = database" lines
+  let fTopicMapping = '';
+  let originalTopicMapping = '';
   let fKeepAlive = 60;
   let fConnectTimeout = 30;
   let fReconnectMin = 1;
@@ -167,21 +170,6 @@
     return [...new Set(topics)];
   }
 
-  function parseTopicMapping(raw: string): Record<string, string> | undefined {
-    const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
-    if (lines.length === 0) return undefined;
-    const map: Record<string, string> = {};
-    for (const line of lines) {
-      // Split on the LAST '=' — a database name can't contain '=', but a topic
-      // legally can, so the tail is unambiguously the database.
-      const idx = line.lastIndexOf('=');
-      if (idx === -1) continue;
-      const topic = line.slice(0, idx).trim();
-      const db = line.slice(idx + 1).trim();
-      if (topic && db) map[topic] = db;
-    }
-    return Object.keys(map).length ? map : undefined;
-  }
 
   function openCreate() {
     editing = null;
@@ -203,6 +191,7 @@
     fTlsCaPath = '';
     fTlsInsecure = false;
     fTopicMapping = '';
+    originalTopicMapping = '';
     fKeepAlive = 60;
     fConnectTimeout = 30;
     fReconnectMin = 1;
@@ -229,9 +218,8 @@
     fTlsKeyPath = sub.tls_key_path ?? '';
     fTlsCaPath = sub.tls_ca_path ?? '';
     fTlsInsecure = sub.tls_insecure_skip_verify;
-    fTopicMapping = sub.topic_mapping
-      ? Object.entries(sub.topic_mapping).map(([t, d]) => `${t} = ${d}`).join('\n')
-      : '';
+    fTopicMapping = formatTopicMapping(sub.topic_mapping);
+    originalTopicMapping = fTopicMapping;
     fKeepAlive = sub.keep_alive_seconds;
     fConnectTimeout = sub.connect_timeout_seconds;
     fReconnectMin = sub.reconnect_min_seconds;
@@ -279,6 +267,17 @@
     const problem = validateForm();
     if (problem) { formError = problem; return; }
 
+    const mappingChanged = !editing || fTopicMapping !== originalTopicMapping;
+    let parsedTopicMapping: MqttTopicMapping | undefined;
+    if (mappingChanged) {
+      try {
+        parsedTopicMapping = parseTopicMapping(fTopicMapping);
+      } catch (err) {
+        formError = err instanceof Error ? err.message : 'Invalid topic mapping';
+        return;
+      }
+    }
+
     isSaving = true;
     formError = '';
     try {
@@ -307,10 +306,13 @@
           tls_ca_path: fTlsCaPath.trim(),
           tls_insecure_skip_verify: fTlsInsecure,
           auto_start: fAutoStart,
-          topic_mapping: parseTopicMapping(fTopicMapping) ?? {},
           clean_session: fCleanSession,
           ...tuning,
         };
+        // Arc validates topic_mapping on update. Omit it unless the user
+        // changed the editor: this keeps legacy/invalid stored filters intact
+        // when changing an unrelated field such as keep-alive.
+        if (mappingChanged) body.topic_mapping = parsedTopicMapping ?? {};
         // Only send password when the user typed a new one or explicitly cleared it.
         if (fClearPassword) body.password = '';
         else if (fPassword) body.password = fPassword;
@@ -331,7 +333,7 @@
           tls_ca_path: fTlsCaPath.trim() || undefined,
           tls_insecure_skip_verify: fTlsInsecure,
           auto_start: fAutoStart,
-          topic_mapping: parseTopicMapping(fTopicMapping),
+          topic_mapping: parsedTopicMapping && Object.keys(parsedTopicMapping).length ? parsedTopicMapping : undefined,
           clean_session: fCleanSession,
           ...tuning,
         };
@@ -759,10 +761,10 @@
             <textarea
               id="mqtt-topic-mapping"
               class="flex min-h-[60px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring"
-              placeholder={"sensors/# = sensor_data\nfactory/+/temperature = factory"}
+              placeholder={"sensors/# = sensor_data\nfactory/+/temperature = factory\n\nOr use a JSON object for rule mappings."}
               bind:value={fTopicMapping}
             ></textarea>
-            <p class="text-xs text-muted-foreground">Override the target database per topic. One <code class="font-mono">topic = database</code> per line.</p>
+            <p class="text-xs text-muted-foreground">Legacy string mappings use one <code class="font-mono">topic = database</code> per line. To configure measurement overrides or topic-derived tags, enter the complete JSON mapping object; existing rule objects are shown as JSON and preserved.</p>
           </div>
 
           <div class="grid grid-cols-2 gap-3">
