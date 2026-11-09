@@ -1,6 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { deleteOrganization, getDb } from '$lib/server/db';
+import { getDb } from '$lib/server/db';
+import { deleteOrganization } from '$lib/server/org';
 import { logOperatorAction } from '$lib/server/audit';
 
 export const PATCH: RequestHandler = async ({ locals, params, request }) => {
