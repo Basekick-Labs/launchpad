@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
   import { getConnectionInfo, getInstanceCapabilities, type ConnectionInfo } from '$lib/cloudApi';
-  import { capabilityUsable, type CapabilitiesView, type CapabilityId } from '$lib/capabilities';
+  import { capabilityIn, type CapabilitiesView, type CapabilityId, type CapabilityState } from '$lib/capabilities';
   import { roleAtLeast } from '$lib/roles';
   import { ArcClient, type QueryResult } from '$lib/arcClient';
   import SQLConsole from '$lib/components/SQLConsole.svelte';
@@ -15,10 +15,11 @@
   import MqttSubscriptions from '$lib/components/MqttSubscriptions.svelte';
   import { LogExplorer } from '$lib/components/logs';
   import StatusBar from '$lib/components/StatusBar.svelte';
+  import ClusterView from '$lib/components/cluster/ClusterView.svelte';
   import { Button } from '$lib/components/ui/button';
   import {
     ArrowLeft, Terminal, Activity, FileText, Database,
-    Clock, BarChart3, Key, Bell, Radio
+    Clock, BarChart3, Key, Bell, Radio, Network
   } from 'lucide-svelte';
 
   export let data: any;
@@ -31,7 +32,7 @@
   let loading = true;
   let error = '';
 
-  type ViewId = 'console' | 'monitoring' | 'logs' | 'retention' | 'continuous-queries' | 'alerts' | 'mqtt' | 'tokens';
+  type ViewId = 'console' | 'monitoring' | 'logs' | 'retention' | 'continuous-queries' | 'alerts' | 'mqtt' | 'tokens' | 'cluster';
   let activeView: ViewId = 'console';
   async function setView(id: string) {
     if (!visibleTabs.some((t) => t.id === id)) return;
@@ -55,6 +56,8 @@
     icon: typeof Terminal;
     disabled: boolean;
     capability?: CapabilityId;
+    /** Capability states that show the tab; default: available only. */
+    showWhen?: readonly CapabilityState[];
   }
 
   const tabs: ConsoleTab[] = [
@@ -66,10 +69,13 @@
     { id: 'alerts', label: 'Alerts', icon: Bell, disabled: false },
     { id: 'mqtt', label: 'MQTT', icon: Radio, disabled: false },
     { id: 'tokens', label: 'Tokens', icon: Key, disabled: false },
+    // Also shown when licensed but turned off, where it explains the
+    // single-node state instead of disappearing.
+    { id: 'cluster', label: 'Cluster', icon: Network, disabled: false, capability: 'cluster', showWhen: ['available', 'disabled'] },
   ];
 
   let capabilities: CapabilitiesView | null = null;
-  $: visibleTabs = tabs.filter((t) => !t.capability || capabilityUsable(capabilities, t.capability));
+  $: visibleTabs = tabs.filter((t) => !t.capability || capabilityIn(capabilities, t.capability, t.showWhen ?? ['available']));
 
   onMount(async () => {
     if (!org) return;
@@ -163,6 +169,8 @@
         <Alerts orgId={org?.id ?? ''} {instanceId} />
       {:else if activeView === 'mqtt'}
         <MqttSubscriptions {client} currentRole={data.currentRole ?? 'viewer'} />
+      {:else if activeView === 'cluster' && org}
+        <ClusterView orgId={org.id} {instanceId} />
       {:else if activeView === 'tokens'}
         <TokenManager {client} arcVersion={connection?.arc_version ?? ''} />
       {/if}

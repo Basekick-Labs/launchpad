@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { formatBytes, formatUptime } from '$lib/format';
   import { onMount, onDestroy } from 'svelte';
   import type { ArcClient, TimeSeriesPoint, MetricsSnapshot, EndpointMetrics } from '$lib/arcClient';
   import MetricChart from './MetricChart.svelte';
@@ -135,23 +136,6 @@
     const target = event.target as HTMLSelectElement;
     durationMinutes = Number(target.value);
     fetchMetrics();
-  }
-
-  function formatBytes(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-    return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
-  }
-
-  function formatUptime(seconds: number): string {
-    const days = Math.floor(seconds / 86400);
-    const hours = Math.floor((seconds % 86400) / 3600);
-    const mins = Math.floor((seconds % 3600) / 60);
-
-    if (days > 0) return `${days}d ${hours}h`;
-    if (hours > 0) return `${hours}h ${mins}m`;
-    return `${mins}m`;
   }
 
   onMount(() => {

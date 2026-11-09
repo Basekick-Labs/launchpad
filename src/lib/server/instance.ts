@@ -14,6 +14,8 @@ export interface Instance {
   arc_version: string | null;
   /** Version the instance reported, when Arc exposes it (cluster mode). */
   detected_arc_version: string | null;
+  /** 'http' | 'https' for cluster node API addresses; null = the endpoint's scheme. */
+  node_scheme: string | null;
   admin_token: string | null;
   created_at: string;
   updated_at: string;
@@ -81,7 +83,7 @@ export type SafeInstance = Omit<Instance, 'admin_token' | 'arc_version'>;
 export function listInstances(orgId: string): SafeInstance[] {
   const db = getDb();
   return db.prepare(
-    `SELECT id, org_id, resource_id, name, endpoint_url, status, detected_arc_version,
+    `SELECT id, org_id, resource_id, name, endpoint_url, status, detected_arc_version, node_scheme,
             created_at, updated_at, suspended_at, deleted_at
      FROM instances WHERE org_id = ? AND deleted_at IS NULL ORDER BY created_at DESC`
   ).all(orgId) as SafeInstance[];
@@ -101,7 +103,7 @@ export function updateInstanceStatus(id: string, status: string): void {
 /** Update the stored connection details and re-check health. */
 export async function updateInstanceConnection(
   id: string,
-  fields: { name?: string | null; endpointUrl?: string; adminToken?: string | null },
+  fields: { name?: string | null; endpointUrl?: string; adminToken?: string | null; nodeScheme?: 'http' | 'https' | null },
 ): Promise<Instance | null> {
   const db = getDb();
   const instance = getInstance(id);
@@ -115,15 +117,16 @@ export async function updateInstanceConnection(
   }
   const adminToken = fields.adminToken !== undefined ? (fields.adminToken?.trim() || null) : instance.admin_token;
   const name = fields.name !== undefined ? (fields.name?.trim() || null) : instance.name;
+  const nodeScheme = fields.nodeScheme !== undefined ? fields.nodeScheme : instance.node_scheme;
 
   const status = await checkArcHealth(endpointUrl, adminToken);
 
   // A different endpoint is a different server: forget the version it reported.
   db.prepare(`
-    UPDATE instances SET name = ?, endpoint_url = ?, admin_token = ?, status = ?, updated_at = datetime('now'),
+    UPDATE instances SET name = ?, endpoint_url = ?, admin_token = ?, status = ?, node_scheme = ?, updated_at = datetime('now'),
       detected_arc_version = CASE WHEN endpoint_url = ? THEN detected_arc_version ELSE NULL END
     WHERE id = ?
-  `).run(name, endpointUrl, adminToken, status, endpointUrl, id);
+  `).run(name, endpointUrl, adminToken, status, nodeScheme, endpointUrl, id);
 
   logEvent(id, 'updated', { endpoint_url: endpointUrl, status });
   return getInstance(id);

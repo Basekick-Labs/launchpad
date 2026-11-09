@@ -240,6 +240,8 @@ function runMigrations(db: Database.Database) {
   // Version reported by the instance itself (#6). arc_version held the latest
   // GitHub release at connect time, not the instance's, and is no longer read.
   ensureColumn(db, 'instances', 'detected_arc_version', 'TEXT');
+  // Scheme for reaching cluster nodes directly (#7); NULL = the endpoint's.
+  ensureColumn(db, 'instances', 'node_scheme', 'TEXT');
 }
 
 /** Idempotently add a column if the table doesn't already have it. */

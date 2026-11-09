@@ -49,13 +49,17 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
     return json({ error: 'Instance not found' }, { status: 404 });
   }
 
-  const { name, endpoint_url, admin_token } = await request.json();
+  const { name, endpoint_url, admin_token, node_scheme } = await request.json();
+  if (node_scheme !== undefined && node_scheme !== null && node_scheme !== 'http' && node_scheme !== 'https') {
+    return json({ error: 'node_scheme must be "http", "https" or null' }, { status: 400 });
+  }
 
   try {
     const updated = await updateInstanceConnection(params.id, {
       ...(name !== undefined ? { name } : {}),
       ...(endpoint_url !== undefined ? { endpointUrl: endpoint_url } : {}),
       ...(admin_token !== undefined ? { adminToken: admin_token } : {}),
+      ...(node_scheme !== undefined ? { nodeScheme: node_scheme } : {}),
     });
     const { admin_token: _t, arc_version: _v, ...safeInstance } = updated!;
     return json({ instance: safeInstance });

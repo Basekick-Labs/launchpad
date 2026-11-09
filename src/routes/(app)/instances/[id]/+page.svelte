@@ -74,6 +74,8 @@
   let editName = '';
   let editEndpoint = '';
   let editToken = '';
+  /** '' = same scheme as the endpoint. */
+  let editNodeScheme: '' | 'http' | 'https' = '';
   let savingEdit = false;
 
   function startEdit() {
@@ -81,6 +83,7 @@
     editName = instance.name ?? '';
     editEndpoint = instance.endpoint_url ?? '';
     editToken = '';
+    editNodeScheme = instance.node_scheme ?? '';
     editing = true;
   }
 
@@ -89,9 +92,10 @@
     if (!editEndpoint.trim()) { toast.error('Arc server URL is required'); return; }
     savingEdit = true;
     try {
-      const payload: { name?: string; endpoint_url?: string; admin_token?: string } = {
+      const payload: { name?: string; endpoint_url?: string; admin_token?: string; node_scheme?: 'http' | 'https' | null } = {
         name: editName.trim(),
         endpoint_url: editEndpoint.trim(),
+        node_scheme: editNodeScheme || null,
       };
       // Only send the token when the field was filled — blank keeps the existing one.
       if (editToken.trim()) payload.admin_token = editToken.trim();
@@ -244,6 +248,23 @@
               class="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             />
             <p class="mt-1 text-xs text-muted-foreground">Use a token with <strong>admin</strong> permission to enable log viewing.</p>
+          </div>
+          <div>
+            <label for="edit-node-scheme" class="mb-1 block text-xs text-muted-foreground">Cluster node scheme</label>
+            <select
+              id="edit-node-scheme"
+              bind:value={editNodeScheme}
+              class="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <option value="">Same as the endpoint</option>
+              <option value="https">https</option>
+              <option value="http">http</option>
+            </select>
+            <p class="mt-1 text-xs text-muted-foreground">
+              Clusters only. Launchpad reads each node's metrics and logs directly at the address Arc reports for it.
+              Choose <strong>http</strong> when the endpoint is an HTTPS load balancer but the nodes serve plain HTTP;
+              the token then crosses your internal network unencrypted.
+            </p>
           </div>
           <div class="flex items-center gap-2">
             <Button size="sm" on:click={saveEdit} disabled={savingEdit || !editEndpoint.trim()}>

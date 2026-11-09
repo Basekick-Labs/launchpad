@@ -1,4 +1,5 @@
 import type { CapabilitiesView } from '$lib/capabilities';
+import type { ClusterStatus, NodeLogEntry, NodeSnapshot, SeriesPoint, SeriesType, Standalone } from '$lib/cluster';
 
 export interface User {
   id: string;
@@ -23,6 +24,8 @@ export interface Instance {
   status: string;
   /** Version the instance reported; null when Arc does not expose it. */
   detected_arc_version: string | null;
+  /** Scheme for cluster node API addresses; null = the endpoint's. */
+  node_scheme: 'http' | 'https' | null;
   created_at: string;
   updated_at: string;
 }
@@ -157,7 +160,7 @@ export async function deleteInstance(orgId: string, id: string): Promise<void> {
 export async function updateInstance(
   orgId: string,
   id: string,
-  params: { name?: string; endpoint_url?: string; admin_token?: string | null },
+  params: { name?: string; endpoint_url?: string; admin_token?: string | null; node_scheme?: 'http' | 'https' | null },
 ): Promise<Instance> {
   const res = await apiFetch(`/api/v1/orgs/${orgId}/instances/${id}`, {
     method: 'PATCH',
@@ -294,4 +297,67 @@ export async function webauthnDeleteCredential(id: string): Promise<void> {
     const d = await res.json();
     throw new Error(d.error || 'Failed to delete passkey');
   }
+}
+
+// ---------------------------------------------------------------------------
+// Cluster (#7). Errors carry Launchpad's code (e.g. 'unreachable',
+// 'identity_mismatch') so the view can explain each failure.
+
+export class ClusterApiError extends Error {
+  constructor(public readonly code: string, message: string) {
+    super(message);
+    this.name = 'ClusterApiError';
+  }
+}
+
+async function clusterFetch<T>(path: string): Promise<T> {
+  const res = await apiFetch(path);
+  if (res.ok) return res.json();
+  const body = (await res.json().catch(() => null)) as { error?: string; message?: string } | null;
+  throw new ClusterApiError(body?.error ?? 'error', body?.message ?? `Request failed (${res.status})`);
+}
+
+export interface ClusterViewResponse {
+  status: ClusterStatus | Standalone;
+  checkIntervalMs: number | null;
+  serverTime: number | null;
+  reachability: Record<string, { reachable: boolean; error: string | null }>;
+  fetchedAt: number;
+}
+
+export interface NodeSnapshotResponse {
+  nodeId: string;
+  source: string;
+  fetchedAt: number;
+  snapshot: NodeSnapshot;
+  series: Record<SeriesType, SeriesPoint[]>;
+  spanMinutes: number;
+}
+
+export interface NodeLogsResponse {
+  nodeId: string;
+  source: string;
+  fetchedAt: number;
+  logs: NodeLogEntry[];
+}
+
+const clusterBase = (orgId: string, id: string) => `/api/v1/orgs/${orgId}/instances/${id}/cluster`;
+
+export function getClusterView(orgId: string, id: string): Promise<ClusterViewResponse> {
+  return clusterFetch(clusterBase(orgId, id));
+}
+
+export function getNodeSnapshot(orgId: string, id: string, nodeId: string, duration: number): Promise<NodeSnapshotResponse> {
+  return clusterFetch(`${clusterBase(orgId, id)}/nodes/${encodeURIComponent(nodeId)}/snapshot?duration=${duration}`);
+}
+
+export function getNodeLogs(
+  orgId: string,
+  id: string,
+  nodeId: string,
+  q: { limit: number; level: string | null; since: number },
+): Promise<NodeLogsResponse> {
+  const params = new URLSearchParams({ limit: String(q.limit), since: String(q.since) });
+  if (q.level) params.set('level', q.level);
+  return clusterFetch(`${clusterBase(orgId, id)}/nodes/${encodeURIComponent(nodeId)}/logs?${params}`);
 }

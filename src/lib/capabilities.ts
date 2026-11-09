@@ -486,6 +486,12 @@ export function tierLabel(tier: string | null): string | null {
   return TIER_LABELS[tier] ?? tier;
 }
 
+/** True when the caller may see the capability and its state is one of `states`. */
+export function capabilityIn(view: CapabilitiesView | null, id: CapabilityId, states: readonly CapabilityState[]): boolean {
+  const c = view?.capabilities.find((x) => x.id === id);
+  return !!c && states.includes(c.state);
+}
+
 /** One-line explanation for a capability state, for the UI. */
 export function describeCapability(c: Pick<CapabilityView, 'state' | 'reason'>): string {
   switch (c.reason) {

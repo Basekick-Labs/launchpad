@@ -105,6 +105,45 @@ export function isPrivateIp(ip: string): boolean {
   return false;
 }
 
+export type IpClass = 'loopback' | 'private' | 'public' | 'forbidden';
+
+function classifyIpv4Bytes(b: number[]): IpClass {
+  const [a, c] = b;
+  if (a === 127) return 'loopback';
+  if (a === 0 || a >= 224) return 'forbidden';        // "this" network, multicast, reserved
+  if (a === 169 && c === 254) return 'forbidden';     // link-local / cloud metadata
+  if (a === 10 || (a === 172 && c >= 16 && c <= 31) || (a === 192 && c === 168) || (a === 100 && c >= 64 && c <= 127)) {
+    return 'private';
+  }
+  return 'public';
+}
+
+/**
+ * Coarse class of an IP literal, on bytes like {@link isPrivateIp}. Unlike
+ * that check, this splits loopback from private and singles out addresses no
+ * outbound request should reach even when private targets are allowed:
+ * link-local (cloud metadata), unspecified, multicast. Unparseable → forbidden.
+ */
+export function classifyIp(ip: string): IpClass {
+  const bare = ip.replace(/%.*$/, '');
+  const v4 = parseIpv4Bytes(bare);
+  if (v4) return classifyIpv4Bytes(v4);
+  const b = parseIpv6Bytes(bare);
+  if (!b) return 'forbidden';
+  if (b.every((x) => x === 0)) return 'forbidden';                         // ::
+  if (b.every((x, i) => x === (i === 15 ? 1 : 0))) return 'loopback';      // ::1
+  const first10Zero = b.slice(0, 10).every((x) => x === 0);
+  if (first10Zero && ((b[10] === 0xff && b[11] === 0xff) || (b[10] === 0 && b[11] === 0))) {
+    return classifyIpv4Bytes(b.slice(12, 16));
+  }
+  if (b[0] === 0x20 && b[1] === 0x02) return classifyIpv4Bytes(b.slice(2, 6));
+  if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b) return classifyIpv4Bytes(b.slice(12, 16));
+  if (b[0] === 0xff) return 'forbidden';                                    // multicast
+  if (b[0] === 0xfe && (b[1] & 0xc0) === 0x80) return 'forbidden';          // fe80::/10 link-local
+  if ((b[0] & 0xfe) === 0xfc || (b[0] === 0xfe && (b[1] & 0xc0) === 0xc0)) return 'private';
+  return 'public';
+}
+
 /** Reject obviously-unsafe hostnames (localhost, .local, .internal, metadata). */
 function isBlockedHostname(host: string): boolean {
   const h = host.toLowerCase().replace(/\.$/, '');

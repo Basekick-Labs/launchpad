@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isPrivateIp, isSafeUrl, isSafeWebhookUrl } from './ssrf';
+import { isPrivateIp, isSafeUrl, isSafeWebhookUrl, classifyIp } from './ssrf';
 
 // The whole point of classifying on parsed BYTES rather than the textual form
 // is that no re-spelling of an address can slip past the blocklist. These
@@ -166,5 +166,21 @@ describe('isSafeWebhookUrl', () => {
   it('rejects private targets', () => {
     expect(isSafeWebhookUrl('https://127.0.0.1/abc')).toBe(false);
     expect(isSafeWebhookUrl('https://169.254.169.254/latest/meta-data')).toBe(false);
+  });
+});
+
+describe('classifyIp', () => {
+  it('separates loopback, private and public', () => {
+    expect(['127.0.0.1', '::1', '::ffff:127.0.0.1'].map(classifyIp)).toEqual(['loopback', 'loopback', 'loopback']);
+    expect(['10.0.0.5', '172.20.1.1', '192.168.1.9', '100.64.0.1', 'fd00::1'].map(classifyIp)).toEqual(
+      ['private', 'private', 'private', 'private', 'private'],
+    );
+    expect(['8.8.8.8', '2606:4700::1111'].map(classifyIp)).toEqual(['public', 'public']);
+  });
+
+  it('forbids metadata, link-local, unspecified, multicast and garbage in any spelling', () => {
+    for (const ip of ['169.254.169.254', '::ffff:169.254.169.254', '::ffff:a9fe:a9fe', '0.0.0.0', '::', 'fe80::1%eth0', '224.0.0.1', 'ff02::1', 'not-an-ip']) {
+      expect(classifyIp(ip)).toBe('forbidden');
+    }
   });
 });
