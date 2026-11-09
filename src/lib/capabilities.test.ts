@@ -302,3 +302,65 @@ describe('tierLabel', () => {
     expect(tierLabel('custom-x')).toBe('custom-x');
   });
 });
+
+describe('review follow-ups', () => {
+  it('read_only is not a live license: 404s are unlicensed and the notice says features are off', () => {
+    const caps = deriveCapabilities(probes({
+      health: { license: license({ status: 'read_only' }) },
+      probes: { ...probes().probes, tiering: notFound },
+    }));
+    expect(caps.capabilities.tiering).toEqual({ state: 'unlicensed', reason: 'not_licensed' });
+    expect(licenseNotices(caps)[0].message).toMatch(/Enterprise features are off/);
+  });
+
+  it('distinguishes an OSS feature turned off from a licensed one', () => {
+    const caps = deriveCapabilities(probes({
+      probes: { ...probes().probes, backup: notFound, tiering: { status: 503, body: '' } },
+    }));
+    expect(caps.capabilities.backup).toEqual({ state: 'disabled', reason: 'turned_off' });
+    expect(caps.capabilities.tiering).toEqual({ state: 'disabled', reason: 'disabled_in_config' });
+  });
+
+  it('does not read any 403 mentioning "license" as unlicensed', () => {
+    const caps = deriveCapabilities(probes({
+      probes: { ...probes().probes, tiering: { status: 403, body: 'blocked by license proxy' } },
+    }));
+    expect(caps.capabilities.tiering).toEqual({ state: 'unknown', reason: 'error' });
+  });
+
+  it('gives the cluster probe failure its own reason', () => {
+    expect(deriveCapabilities(probes({ cluster: null, clusterProbe: null })).capabilities.cluster.reason).toBe('unreachable');
+    expect(deriveCapabilities(probes({ cluster: null, clusterProbe: { status: 404, body: '' } })).capabilities.cluster.reason).toBe('error');
+    expect(deriveCapabilities(probes({ cluster: null, clusterProbe: adminDenied })).capabilities.cluster.reason).toBe('token_not_admin');
+  });
+
+  it('keeps an unrecognized cluster reason unknown', () => {
+    const caps = deriveCapabilities(probes({ cluster: { ...standalone, reason: 'something new' } }));
+    expect(caps.capabilities.cluster).toEqual({ state: 'unknown', reason: 'error' });
+  });
+
+  it('refuses tier and status values that are not identifiers', () => {
+    expect(parseHealthLicense({ tier: 'enterprise', status: 'License revoked, call +1 555 0100' })).toBeNull();
+    expect(parseHealthLicense({ tier: 'x'.repeat(33), status: 'active' })).toBeNull();
+    expect(parseHealthLicense({ tier: 'tier-5', status: 'suspended_by_vendor' })).toMatchObject({ tier: 'tier-5', rawStatus: 'suspended_by_vendor' });
+  });
+
+  it('warns when Arc reports a paid tier as not active', () => {
+    const caps = deriveCapabilities(probes({ health: { license: license({ status: 'unlicensed' }) } }));
+    expect(licenseNotices(caps)[0]).toMatchObject({ severity: 'critical', message: expect.stringMatching(/not active/) });
+  });
+
+  it('every capability gets a result', () => {
+    const caps = deriveCapabilities(probes());
+    expect(Object.keys(caps.capabilities).sort()).toEqual(
+      ['audit_log', 'backup', 'cluster', 'compaction', 'query_governance', 'query_management', 'rbac', 'tiering'],
+    );
+  });
+
+  it('says so when the token is rejected or missing', () => {
+    const rejected = deriveCapabilities(probes({ tokenRejected: true, cluster: null }));
+    expect(licenseNotices(rejected)[0].message).toMatch(/rejected the stored token/);
+    const none = deriveCapabilities(probes({ hasToken: false, tokenPermissions: null, cluster: null, probes: {} }));
+    expect(licenseNotices(none)[0].message).toMatch(/No admin token is stored/);
+  });
+});

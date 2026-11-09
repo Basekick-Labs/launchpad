@@ -29,6 +29,10 @@ export interface CreateInstanceInput {
   adminToken?: string;
 }
 
+/**
+ * Register a connection to an existing Arc server. No provisioning — we store
+ * the endpoint URL + admin token and record whether it's reachable.
+ */
 export async function createInstance(input: CreateInstanceInput): Promise<Instance> {
   const db = getDb();
 
@@ -66,7 +70,7 @@ export function getInstanceByResourceId(resourceId: string): Instance | null {
 }
 
 /** Instance shape without the secret admin_token — safe to send to clients. */
-export type SafeInstance = Omit<Instance, 'admin_token'>;
+export type SafeInstance = Omit<Instance, 'admin_token' | 'arc_version'>;
 
 /**
  * List an org's instances WITHOUT admin_token. This feeds page loads and API
@@ -77,7 +81,7 @@ export type SafeInstance = Omit<Instance, 'admin_token'>;
 export function listInstances(orgId: string): SafeInstance[] {
   const db = getDb();
   return db.prepare(
-    `SELECT id, org_id, resource_id, name, endpoint_url, status, arc_version, detected_arc_version,
+    `SELECT id, org_id, resource_id, name, endpoint_url, status, detected_arc_version,
             created_at, updated_at, suspended_at, deleted_at
      FROM instances WHERE org_id = ? AND deleted_at IS NULL ORDER BY created_at DESC`
   ).all(orgId) as SafeInstance[];

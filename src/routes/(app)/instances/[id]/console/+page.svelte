@@ -3,6 +3,7 @@
   import { page } from '$app/stores';
   import { getConnectionInfo, getInstanceCapabilities, type ConnectionInfo } from '$lib/cloudApi';
   import { capabilityUsable, type CapabilitiesView, type CapabilityId } from '$lib/capabilities';
+  import { roleAtLeast } from '$lib/roles';
   import { ArcClient, type QueryResult } from '$lib/arcClient';
   import SQLConsole from '$lib/components/SQLConsole.svelte';
   import SchemaExplorer from '$lib/components/SchemaExplorer.svelte';
@@ -33,6 +34,7 @@
   type ViewId = 'console' | 'monitoring' | 'logs' | 'retention' | 'continuous-queries' | 'alerts' | 'mqtt' | 'tokens';
   let activeView: ViewId = 'console';
   async function setView(id: string) {
+    if (!visibleTabs.some((t) => t.id === id)) return;
     activeView = id as ViewId;
     if (org && !connection) {
       try {
@@ -71,8 +73,9 @@
 
   onMount(async () => {
     if (!org) return;
-    // Only probe when some tab depends on it; never block the console on it.
-    if (tabs.some((t) => t.capability)) {
+    // Only probe when some tab depends on it and the role could see one
+    // (capabilities are admin-only today); never block the console on it.
+    if (tabs.some((t) => t.capability) && roleAtLeast(data.currentRole ?? '', 'admin')) {
       getInstanceCapabilities(org.id, instanceId)
         .then((view) => { capabilities = view; })
         .catch(() => { /* capability tabs stay hidden */ });

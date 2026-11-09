@@ -258,8 +258,15 @@ export interface SafeRequestOptions extends SafeUrlOptions {
    * Resolve with at most this many body bytes, then close the connection.
    * For probes that need the status and a little of the body: a large healthy
    * response is a success here, where maxResponseBytes would make it a failure.
+   * Takes precedence: with both set, maxResponseBytes only applies if larger.
    */
   truncateResponseAt?: number;
+  /**
+   * Aborts the request (DNS, connect, and body) when it fires. timeoutMs is an
+   * idle timeout, so a server that drips a byte at a time never trips it; this
+   * is the overall deadline.
+   */
+  signal?: AbortSignal;
 }
 
 export interface SafeResponse {
@@ -276,11 +283,25 @@ export interface SafeResponse {
  * timeout, oversized response, or transport error. This is the single shared
  * outbound primitive for the proxy, alert queries, health checks, and webhooks.
  */
+/** dns.lookup cannot be cancelled; race it so an abort deadline still holds. */
+function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
 export async function safeRequest(
   rawUrl: string,
   opts: SafeRequestOptions = {},
 ): Promise<SafeResponse> {
-  const target = await assertSafeResolvedUrl(rawUrl, opts);
+  const { signal } = opts;
+  if (opts.truncateResponseAt !== undefined && !(Number.isInteger(opts.truncateResponseAt) && opts.truncateResponseAt >= 0)) {
+    throw new Error('truncateResponseAt must be a non-negative integer');
+  }
+  signal?.throwIfAborted();
+  const target = signal ? await raceAbort(assertSafeResolvedUrl(rawUrl, opts), signal) : await assertSafeResolvedUrl(rawUrl, opts);
   const url = new URL(rawUrl);
   const mod = target.protocol === 'https:' ? https : http;
   const timeoutMs = opts.timeoutMs ?? 15_000;
@@ -296,6 +317,9 @@ export async function safeRequest(
           path: opts.path ?? (url.pathname + url.search),
           method,
           headers: { Host: url.host, ...(opts.headers ?? {}) }, // preserve vhost routing
+          // Applies before the socket connects, which req.setTimeout alone does
+          // not: a blackholed address would otherwise wait for the OS SYN timeout.
+          timeout: timeoutMs,
         },
         (res) => {
           const chunks: Buffer[] = [];
@@ -308,7 +332,7 @@ export async function safeRequest(
               if (chunk.length >= room) {
                 chunks.push(chunk.subarray(0, room));
                 total += room;
-                done(); // settle first: the destroy below emits 'error'
+                done(); // settle first, then drop the rest of the response
                 req.destroy();
                 return;
               }
@@ -324,6 +348,9 @@ export async function safeRequest(
         },
       );
       req.setTimeout(timeoutMs, () => req.destroy(new Error('Request timed out')));
+      const onAbort = () => req.destroy(signal?.reason instanceof Error ? signal.reason : new Error('Request aborted'));
+      signal?.addEventListener('abort', onAbort, { once: true });
+      req.on('close', () => signal?.removeEventListener('abort', onAbort));
       req.on('error', reject);
       if (opts.body != null && method !== 'GET' && method !== 'HEAD') req.write(opts.body);
       req.end();
@@ -336,6 +363,7 @@ export async function safeRequest(
   // return it — an HTTP error is a real answer, not a connection failure.
   let lastErr: unknown;
   for (const ip of target.ips) {
+    signal?.throwIfAborted();
     try {
       return await attempt(ip);
     } catch (err) {

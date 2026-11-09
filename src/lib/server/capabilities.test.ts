@@ -1,7 +1,8 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { clearCapabilityCache, discoverCapabilities, type DiscoveryTarget } from './capabilities';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CAPABILITIES } from '../capabilities';
+import { discoverCapabilities, resetCapabilityCacheForTests, type DiscoveryTarget } from './capabilities';
 import { getDb } from './db';
 
 /**
@@ -65,15 +66,22 @@ function seedInstance(token: string | null = 'admin-token'): DiscoveryTarget {
 const opts = { allowPrivate: true };
 
 beforeEach(() => {
-  clearCapabilityCache();
+  resetCapabilityCacheForTests();
   routes = enterpriseRoutes();
   requests = [];
 });
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+const PROBE_COUNT = 3 + CAPABILITIES.filter((d) => d.probePath).length; // health, verify, cluster
+const paths = () => requests.map((r) => r.path).sort();
+
 describe('discoverCapabilities', () => {
   it('sends the admin token on every probe, /health included, and only GETs', async () => {
     await discoverCapabilities(seedInstance(), opts);
-    expect(requests.length).toBe(10);
+    expect(requests.length).toBe(PROBE_COUNT);
     expect(requests.every((r) => r.auth === 'Bearer admin-token' && r.method === 'GET')).toBe(true);
   });
 
@@ -102,8 +110,16 @@ describe('discoverCapabilities', () => {
     expect(caps.capabilities.rbac.state).toBe('available');
   });
 
+  it('clears the stored version when the cluster reports none', async () => {
+    const t = seedInstance();
+    getDb().prepare("UPDATE instances SET detected_arc_version = '26.09.3' WHERE id = ?").run(t.id);
+    routes['/api/v1/cluster'] = json(200, { enabled: false, mode: 'standalone', reason: 'Clustering not enabled in configuration' });
+    await discoverCapabilities(t, opts);
+    const row = getDb().prepare('SELECT detected_arc_version FROM instances WHERE id = ?').get(t.id) as { detected_arc_version: string | null };
+    expect(row.detected_arc_version).toBeNull();
+  });
+
   it('shares one probe set between concurrent callers', async () => {
-    routes['/health'].delayMs = 50;
     const t = seedInstance();
     const [a, b, c] = await Promise.all([1, 2, 3].map(() => discoverCapabilities(t, opts)));
     expect(a).toBe(b);
@@ -119,6 +135,25 @@ describe('discoverCapabilities', () => {
     expect(requests.filter((r) => r.path === '/health').length).toBe(1);
   });
 
+  it('re-probes on a forced refresh once the minimum interval has passed', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const t = seedInstance();
+    await discoverCapabilities(t, opts);
+    vi.setSystemTime(Date.now() + 11_000);
+    await discoverCapabilities(t, { ...opts, force: true });
+    expect(requests.filter((r) => r.path === '/health').length).toBe(2);
+  });
+
+  it('caches a partial failure only briefly', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    routes['/api/v1/governance/policies'] = json(500, {});
+    const t = seedInstance();
+    await discoverCapabilities(t, opts);
+    vi.setSystemTime(Date.now() + 16_000);
+    await discoverCapabilities(t, opts);
+    expect(requests.filter((r) => r.path === '/health').length).toBe(2);
+  });
+
   it('re-probes when the stored token changes', async () => {
     const t = seedInstance();
     await discoverCapabilities(t, opts);
@@ -132,8 +167,23 @@ describe('discoverCapabilities', () => {
     const caps = await discoverCapabilities(t, opts);
     await discoverCapabilities(t, opts);
     expect(caps.reachable).toBe(false);
-    expect(requests.map((r) => r.path)).toEqual(['/health']);
+    expect(paths()).toEqual(['/api/v1/auth/verify', '/health']);
   });
+
+  it('stops after the token check when Arc rejects the token', async () => {
+    routes['/api/v1/auth/verify'] = json(401, { valid: false });
+    const caps = await discoverCapabilities(seedInstance(), opts);
+    expect(paths()).toEqual(['/api/v1/auth/verify', '/health']);
+    expect(caps.capabilities.rbac.reason).toBe('token_rejected');
+    expect(caps.capabilities.cluster.reason).toBe('token_rejected');
+  });
+
+  it('reports why the cluster probe failed', async () => {
+    routes['/api/v1/cluster'] = json(500, {});
+    const caps = await discoverCapabilities(seedInstance(), opts);
+    expect(caps.capabilities.cluster).toEqual({ state: 'unknown', reason: 'error' });
+  });
+
 
   it('probes only /health without a stored token', async () => {
     const caps = await discoverCapabilities(seedInstance(null), opts);
@@ -143,14 +193,20 @@ describe('discoverCapabilities', () => {
     expect(caps.capabilities.rbac.reason).toBe('no_token');
   });
 
-  it('reports a non-admin token instead of guessing licenses', async () => {
+  it('reports a non-admin token instead of probing admin routes with it', async () => {
     routes['/api/v1/auth/verify'] = json(200, { valid: true, permissions: ['read', 'write'] });
-    for (const p of ['/api/v1/rbac/organizations', '/api/v1/tiering/policies', '/api/v1/backup/status']) {
-      routes[p] = json(403, { error: 'Permission denied: admin required', success: false });
-    }
     const caps = await discoverCapabilities(seedInstance(), opts);
+    // Each 403 would be an auth-failure tick in Arc; cluster takes any token.
+    expect(paths()).toEqual(['/api/v1/auth/verify', '/api/v1/cluster', '/health']);
     expect(caps.tokenIsAdmin).toBe(false);
     expect(caps.capabilities.rbac.reason).toBe('token_not_admin');
-    expect(caps.capabilities.tiering.reason).toBe('token_not_admin');
+    expect(caps.capabilities.cluster.state).toBe('available');
+  });
+
+  it('reads the 403 wording when verify gave no permissions', async () => {
+    routes['/api/v1/auth/verify'] = json(500, {});
+    routes['/api/v1/tiering/policies'] = json(403, { error: 'Permission denied: admin required', success: false });
+    const caps = await discoverCapabilities(seedInstance(), opts);
+    expect(caps.capabilities.tiering).toEqual({ state: 'unknown', reason: 'token_not_admin' });
   });
 });

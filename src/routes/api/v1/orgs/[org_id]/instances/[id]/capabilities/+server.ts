@@ -5,7 +5,7 @@ import { getInstance } from '$lib/server/instance';
 import { allowPrivateEndpoints } from '$lib/server/arcConnection';
 import { discoverCapabilities } from '$lib/server/capabilities';
 import { roleAtLeast } from '$lib/roles';
-import { viewForRole } from '$lib/capabilities';
+import { CAPABILITIES, viewForRole, type CapabilitiesView } from '$lib/capabilities';
 
 /**
  * What the connected Arc instance supports (#6), filtered for the caller's
@@ -13,6 +13,9 @@ import { viewForRole } from '$lib/capabilities';
  * not an access boundary: members can read Arc's /health through the proxy.
  *
  * `?refresh=1` re-probes (owner/admin only, rate-limited by the cache).
+ *
+ * Not tied to request.signal: discovery is shared between callers and has
+ * its own deadline (src/lib/server/capabilities.ts).
  */
 export const GET: RequestHandler = async ({ locals, params, url }) => {
   if (!locals.user) {
@@ -29,6 +32,20 @@ export const GET: RequestHandler = async ({ locals, params, url }) => {
   const instance = getInstance(params.id);
   if (!instance || instance.org_id !== params.org_id) {
     return json({ error: 'Instance not found' }, { status: 404 });
+  }
+
+  // A role that can see no capability gets nothing from discovery but would
+  // still cost Arc a probe set with the admin token: answer from the row.
+  if (!CAPABILITIES.some((d) => roleAtLeast(membership.role, d.minRole))) {
+    const view: CapabilitiesView = {
+      reachable: instance.status === 'running',
+      version: instance.detected_arc_version,
+      showEnterprise: false,
+      tier: null,
+      notices: [],
+      capabilities: [],
+    };
+    return json(view);
   }
 
   const force = url.searchParams.get('refresh') === '1' && roleAtLeast(membership.role, 'admin');

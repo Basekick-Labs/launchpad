@@ -52,6 +52,7 @@ export type CapabilityReason =
   | 'ok'
   | 'not_licensed'
   | 'disabled_in_config'
+  | 'turned_off'
   | 'arc_auth_off'
   | 'not_enabled'
   | 'token_not_admin'
@@ -103,15 +104,22 @@ export interface ClusterInfo {
 }
 
 export interface ProbeResults {
-  /** Whether a token is stored; without one only /health is probed. */
+  /**
+   * Whether a token is stored. Without one only /health is probed: an Arc with
+   * auth on would log every other probe as a failed authentication.
+   */
   hasToken: boolean;
   /** null when /health could not be read at all. */
   health: { license: LicenseSummary | null } | null;
   /** Permissions of the stored token from /api/v1/auth/verify; null = unknown. */
   tokenPermissions: string[] | null;
+  /** Arc answered 401 to the stored token; nothing past /health was probed. */
   tokenRejected: boolean;
-  /** null when /api/v1/cluster failed or was not probed. */
+  /** The /api/v1/cluster answer; undefined when not probed. */
+  clusterProbe?: ProbeOutcome;
+  /** Its parsed body, when it was a 2xx Arc cluster response. */
   cluster: ClusterInfo | null;
+  /** Gated probe answers; an absent id was not probed (see the token fields). */
   probes: Partial<Record<CapabilityId, ProbeOutcome>>;
 }
 
@@ -141,12 +149,24 @@ function str(value: unknown): string | null {
   return typeof value === 'string' && value !== '' ? value : null;
 }
 
+/**
+ * Tier and status identifiers are shown in the UI, and the Arc server is
+ * whatever the org admin pointed the connection at: accept identifier-shaped
+ * values only, so a server cannot put its own sentences in a Launchpad notice.
+ */
+const IDENTIFIER_RE = /^[a-z0-9_-]{1,32}$/i;
+
+function identifier(value: unknown): string | null {
+  const v = str(value);
+  return v && IDENTIFIER_RE.test(v) ? v : null;
+}
+
 /** Validate the `license` block of /health. Anything malformed is ignored. */
 export function parseHealthLicense(value: unknown): LicenseSummary | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
   const v = value as Record<string, unknown>;
-  const tier = str(v.tier);
-  const rawStatus = str(v.status);
+  const tier = identifier(v.tier);
+  const rawStatus = identifier(v.status);
   if (!tier || !rawStatus) return null;
   const known = LICENSE_STATUSES.has(rawStatus as LicenseStatus);
   return {
@@ -187,19 +207,31 @@ export function parseClusterInfo(value: unknown): ClusterInfo | null {
   };
 }
 
-const LICENSE_403 = /requires an enterprise license|license/i;
+/** Arc's license-gate wording (e.g. internal/api/tiering.go). */
+const LICENSE_403 = /requires an enterprise license/i;
+/** auth.RequireAdmin's wording; it runs before the license gate. */
 const ADMIN_403 = /admin required|permission denied/i;
 
-/** True when the license is in a state that keeps Enterprise features on. */
+/**
+ * True when the license keeps Enterprise features on. v26.09.3 relays a
+ * license-server `read_only` status, under which its IsValid() is false.
+ */
 function licenseIsLive(license: LicenseSummary | null): boolean {
   if (!license || license.tier === 'oss') return false;
-  return license.status === 'active' || license.status === 'grace_period' ||
-    license.status === 'writes_stopped' || license.status === 'read_only';
+  return license.status === 'active' || license.status === 'grace_period' || license.status === 'writes_stopped';
+}
+
+/** A non-2xx (or failed) answer to a request Arc should have served. */
+function classifyFailure(outcome: ProbeOutcome): CapabilityResult {
+  if (outcome === null) return { state: 'unknown', reason: 'unreachable' };
+  if (outcome.status === 401) return { state: 'unknown', reason: 'token_rejected' };
+  if (outcome.status === 403 && ADMIN_403.test(outcome.body)) return { state: 'unknown', reason: 'token_not_admin' };
+  return { state: 'unknown', reason: 'error' };
 }
 
 function classifyCluster(probes: ProbeResults, license: LicenseSummary | null): CapabilityResult {
   const c = probes.cluster;
-  if (!c) return { state: 'unknown', reason: probes.tokenRejected ? 'token_rejected' : 'unreachable' };
+  if (!c) return probes.clusterProbe === undefined ? { state: 'unknown', reason: 'error' } : classifyFailure(probes.clusterProbe);
   if (c.enabled) return { state: 'available', reason: 'ok' };
   // Arc's reasons: "Enterprise license not configured", "...not valid",
   // "License does not include clustering feature", "Clustering not enabled
@@ -219,21 +251,18 @@ function classifyProbe(
   license: LicenseSummary | null,
   features: string[] | null,
 ): CapabilityResult {
-  if (outcome === undefined) return { state: 'unknown', reason: 'no_token' };
+  if (outcome === undefined) return { state: 'unknown', reason: 'error' };
   if (outcome === null) return { state: 'unknown', reason: 'unreachable' };
   const { status, body } = outcome;
   if (status >= 200 && status < 300) return { state: 'available', reason: 'ok' };
-  if (status === 401) return { state: 'unknown', reason: 'token_rejected' };
-  if (status === 403) {
-    // RequireAdmin runs before the license gate, so a non-admin token gets a
-    // 403 too. Only Arc's license wording means "not licensed".
-    if (ADMIN_403.test(body)) return { state: 'unknown', reason: 'token_not_admin' };
-    if (LICENSE_403.test(body)) return { state: 'unlicensed', reason: 'not_licensed' };
-    return { state: 'unknown', reason: 'error' };
+  // RequireAdmin runs before the license gate, so a non-admin token gets a
+  // 403 too. Only Arc's license wording means "not licensed".
+  if (status === 403 && LICENSE_403.test(body) && !ADMIN_403.test(body)) {
+    return { state: 'unlicensed', reason: 'not_licensed' };
   }
   if (status === 404) {
     // OSS features (backup, compaction) are only absent when off in config.
-    if (def.licenseFeature === null) return { state: 'disabled', reason: 'disabled_in_config' };
+    if (def.licenseFeature === null) return { state: 'disabled', reason: 'turned_off' };
     // RBAC routes register whenever Arc auth is on (unlicensed is a 403), so a
     // 404 means Arc runs without auth.
     if (def.id === 'rbac') return { state: 'disabled', reason: 'arc_auth_off' };
@@ -246,8 +275,16 @@ function classifyProbe(
     }
     return { state: 'unavailable', reason: 'not_enabled' };
   }
-  if (status === 503) return { state: 'disabled', reason: 'disabled_in_config' };
-  return { state: 'unknown', reason: 'error' };
+  if (status === 503) return { state: 'disabled', reason: def.licenseFeature === null ? 'turned_off' : 'disabled_in_config' };
+  return classifyFailure(outcome);
+}
+
+/** Why gated probes were skipped, when the token says they would fail. */
+function skippedReason(probes: ProbeResults, tokenIsAdmin: boolean | null): CapabilityReason | null {
+  if (!probes.hasToken) return 'no_token';
+  if (probes.tokenRejected) return 'token_rejected';
+  if (tokenIsAdmin === false) return 'token_not_admin';
+  return null;
 }
 
 /** The decision table: probe results → per-capability states. */
@@ -258,18 +295,22 @@ export function deriveCapabilities(probes: ProbeResults): InstanceCapabilities {
   const features = probes.cluster?.licenseValid === true ? probes.cluster.features : null;
   const tokenIsAdmin = probes.tokenPermissions ? probes.tokenPermissions.includes('admin') : null;
 
-  const capabilities = {} as Record<CapabilityId, CapabilityResult>;
-  for (const def of CAPABILITIES) {
-    if (!probes.health) {
-      capabilities[def.id] = { state: 'unknown', reason: 'unreachable' };
-    } else if (!probes.hasToken) {
-      capabilities[def.id] = { state: 'unknown', reason: 'no_token' };
-    } else if (def.id === 'cluster') {
-      capabilities[def.id] = classifyCluster(probes, license);
-    } else {
-      capabilities[def.id] = classifyProbe(def, probes.probes[def.id], license, features);
+  const skipped = skippedReason(probes, tokenIsAdmin);
+
+  const classify = (def: CapabilityDefinition): CapabilityResult => {
+    if (!probes.health) return { state: 'unknown', reason: 'unreachable' };
+    // /api/v1/cluster takes any valid token, so only a missing or rejected
+    // token leaves it unprobed; gated areas also need admin.
+    if (def.id === 'cluster') {
+      return skipped && skipped !== 'token_not_admin' ? { state: 'unknown', reason: skipped } : classifyCluster(probes, license);
     }
-  }
+    if (skipped) return { state: 'unknown', reason: skipped };
+    return classifyProbe(def, probes.probes[def.id], license, features);
+  };
+  const capabilities = Object.fromEntries(CAPABILITIES.map((def) => [def.id, classify(def)])) as Record<
+    CapabilityId,
+    CapabilityResult
+  >;
 
   return {
     reachable: probes.health !== null,
@@ -304,7 +345,18 @@ export function licenseNotices(caps: InstanceCapabilities, now = Date.now()): Li
   const notices: LicenseNotice[] = [];
   const lic = caps.license;
 
-  if (caps.tokenIsAdmin === false) {
+  const tokenReason = caps.capabilities.cluster.reason;
+  if (tokenReason === 'token_rejected') {
+    notices.push({
+      severity: 'warning',
+      message: 'Arc rejected the stored token, so Enterprise features cannot be checked. Update the connection with a valid admin token.',
+    });
+  } else if (tokenReason === 'no_token') {
+    notices.push({
+      severity: 'info',
+      message: 'No admin token is stored for this connection, so Enterprise features cannot be checked.',
+    });
+  } else if (caps.tokenIsAdmin === false) {
     notices.push({
       severity: 'warning',
       message: 'The stored Arc token lacks admin permission, so Enterprise features cannot be checked. Update the connection with an admin token.',
@@ -312,9 +364,7 @@ export function licenseNotices(caps: InstanceCapabilities, now = Date.now()): Li
   }
   if (!lic) return notices;
 
-  const anyAvailable = CAPABILITIES.some(
-    (d) => d.licenseFeature !== null && caps.capabilities[d.id].state === 'available',
-  );
+  const anyAvailable = anyLicensedAvailable(caps);
   const expires = formatDate(lic.expiresAt);
   const writesStop = formatDate(lic.writesStopAt);
   const cutoff = formatDate(lic.cutoff);
@@ -337,7 +387,10 @@ export function licenseNotices(caps: InstanceCapabilities, now = Date.now()): Li
       });
       break;
     case 'read_only':
-      notices.push({ severity: 'critical', message: 'The license is read-only. Arc is refusing writes.' });
+      notices.push({ severity: 'critical', message: 'The license is read-only. Arc is refusing writes, and Enterprise features are off.' });
+      break;
+    case 'unlicensed':
+      notices.push({ severity: 'critical', message: 'Arc reports the license as not active, so Enterprise features are off.' });
       break;
     case 'grace_period':
       notices.push({
@@ -379,14 +432,17 @@ export interface CapabilitiesView {
   capabilities: CapabilityView[];
 }
 
+function anyLicensedAvailable(caps: InstanceCapabilities): boolean {
+  return CAPABILITIES.some((d) => d.licenseFeature !== null && caps.capabilities[d.id].state === 'available');
+}
+
 /**
  * Enterprise UI is driven by what the instance shows, not its tier name: a
  * configured license (any tier, including a failed one, so its notice is
  * seen) or an observed licensed feature.
  */
 function enterpriseObserved(caps: InstanceCapabilities): boolean {
-  if (caps.license) return true;
-  return CAPABILITIES.some((d) => d.licenseFeature !== null && caps.capabilities[d.id].state === 'available');
+  return caps.license !== null || anyLicensedAvailable(caps);
 }
 
 export function viewForRole(caps: InstanceCapabilities, role: string, now = Date.now()): CapabilitiesView {
@@ -412,11 +468,7 @@ export function capabilityUsable(view: CapabilitiesView | null, id: CapabilityId
   return view?.capabilities.find((c) => c.id === id)?.state === 'available';
 }
 
-/**
- * Display name for Arc's license tier. Arc's API still sends the original
- * identifiers (internal/license/license.go); the product names are Tier I–IV.
- * Anything else (a future identifier) is shown as Arc sent it.
- */
+/** Arc's API still sends the original identifiers (internal/license/license.go). */
 const TIER_LABELS: Record<string, string> = {
   starter: 'Tier I',
   professional: 'Tier II',
@@ -424,6 +476,11 @@ const TIER_LABELS: Record<string, string> = {
   unlimited: 'Tier IV',
 };
 
+/**
+ * Display name for Arc's license tier: the product names are Tier I–IV.
+ * Anything else (a future identifier) is shown as Arc sent it, already
+ * restricted to identifier characters by parseHealthLicense.
+ */
 export function tierLabel(tier: string | null): string | null {
   if (!tier || tier === 'oss') return null;
   return TIER_LABELS[tier] ?? tier;
@@ -435,6 +492,7 @@ export function describeCapability(c: Pick<CapabilityView, 'state' | 'reason'>):
     case 'ok': return 'Available';
     case 'not_licensed': return 'Not included in the license';
     case 'disabled_in_config': return 'Licensed, but turned off in Arc’s configuration';
+    case 'turned_off': return 'Turned off in Arc’s configuration';
     case 'arc_auth_off': return 'Requires authentication to be enabled in Arc';
     case 'not_enabled': return 'Not enabled on this instance';
     case 'token_not_admin': return 'Cannot check: the stored token is not an admin token';

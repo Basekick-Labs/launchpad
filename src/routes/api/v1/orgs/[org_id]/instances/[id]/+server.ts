@@ -25,7 +25,8 @@ export const GET: RequestHandler = async ({ locals, params }) => {
   const events = getInstanceEvents(params.id, 20);
 
   // Strip sensitive fields from response
-  const { admin_token, ...safeInstance } = instance;
+  // arc_version is the legacy GitHub-release guess; detected_arc_version replaces it.
+  const { admin_token, arc_version, ...safeInstance } = instance;
   return json({ instance: safeInstance, events });
 };
 
@@ -56,7 +57,7 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
       ...(endpoint_url !== undefined ? { endpointUrl: endpoint_url } : {}),
       ...(admin_token !== undefined ? { adminToken: admin_token } : {}),
     });
-    const { admin_token: _t, ...safeInstance } = updated!;
+    const { admin_token: _t, arc_version: _v, ...safeInstance } = updated!;
     return json({ instance: safeInstance });
   } catch (err: any) {
     const known = err?.name === 'PrivateEndpointBlockedError' || /valid Arc server URL/i.test(err?.message || '');
