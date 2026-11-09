@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher, onDestroy } from 'svelte';
+  import { createEventDispatcher, onDestroy, onMount } from 'svelte';
   import { ClusterApiError, getGovernance, getTokenQueryUsage } from '$lib/cloudApi';
   import {
     isUnlimited,
@@ -55,7 +55,7 @@
       }
     }
   }
-  load();
+  onMount(load);
 
   async function loadUsage(tokenId: number) {
     usageAbort?.abort();

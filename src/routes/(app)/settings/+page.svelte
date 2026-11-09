@@ -3,6 +3,7 @@
   import { updateProfile, updateOrg, mfaSetup, mfaSetupConfirm, mfaDisable, mfaRegenerateRecoveryCodes, webauthnRegisterOptions, webauthnRegisterVerify, webauthnDeleteCredential } from '$lib/cloudApi';
   import { startRegistration } from '@simplewebauthn/browser';
   import { Button } from '$lib/components/ui/button';
+  import { onMount } from 'svelte';
   import ThemeToggle from '$lib/components/ThemeToggle.svelte';
   import { timezone, formatDateTime } from '$lib/stores/timezone';
   import { Check, Shield, Key, Trash2, Copy, Download, Globe } from 'lucide-svelte';
@@ -47,7 +48,8 @@
       mgDomain = e.domain || ''; mgApiUrl = e.apiUrl || '';
     }
   }
-  loadEmailConfig();
+  // In the browser only: a relative fetch during SSR throws.
+  onMount(loadEmailConfig);
 
   function emailPayload() {
     if (emailCfg.provider === 'smtp') {
