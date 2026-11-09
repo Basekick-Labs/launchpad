@@ -341,3 +341,23 @@ export function getNodeLogs(
   if (q.level) params.set('level', q.level);
   return clusterFetch(`${clusterBase(orgId, id)}/nodes/${encodeURIComponent(nodeId)}/logs?${params}`, signal);
 }
+
+// ---------------------------------------------------------------------------
+// Instance change log: Arc changes made through Launchpad, with who made them.
+
+export interface InstanceChange {
+  id: number;
+  method: string;
+  path: string;
+  status: number | null;
+  outcome: 'ok' | 'error' | 'unknown';
+  createdAt: string;
+  actor: { id: string; email: string; name: string | null } | null;
+}
+
+export async function getInstanceChanges(orgId: string, id: string, beforeId?: number): Promise<InstanceChange[]> {
+  const qs = beforeId ? `?before=${beforeId}` : '';
+  const res = await apiFetch(`/api/v1/orgs/${orgId}/instances/${id}/changes${qs}`);
+  if (!res.ok) throw new Error('Failed to load the change history');
+  return (await res.json()).changes;
+}

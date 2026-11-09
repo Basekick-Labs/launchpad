@@ -3,7 +3,8 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import {
-    getInstance, updateInstance, deleteInstance, getInstanceCapabilities, type Instance
+    getInstance, updateInstance, deleteInstance, getInstanceCapabilities, getInstanceChanges,
+    type Instance, type InstanceChange
   } from '$lib/cloudApi';
   import { describeCapability, tierLabel, type CapabilitiesView, type CapabilityState } from '$lib/capabilities';
   import { roleAtLeast } from '$lib/roles';
@@ -23,6 +24,31 @@
   $: isOrgAdmin = roleAtLeast(data.currentRole ?? '', 'admin');
 
   let capabilities: CapabilitiesView | null = null;
+
+  // Change history (owner/admin): Arc changes made through Launchpad, by whom.
+  let changes: InstanceChange[] = [];
+  let changesMore = false;
+  let changesLoading = false;
+
+  async function loadChanges(more = false) {
+    if (!org || !isOrgAdmin) return;
+    changesLoading = true;
+    try {
+      const page = await getInstanceChanges(org.id, instanceId, more ? changes[changes.length - 1]?.id : undefined);
+      changes = more ? [...changes, ...page] : page;
+      changesMore = page.length === 50;
+    } catch {
+      if (more) toast.error('Could not load more history');
+    } finally {
+      changesLoading = false;
+    }
+  }
+
+  const OUTCOME_CLASS = {
+    ok: 'text-muted-foreground',
+    error: 'text-destructive',
+    unknown: 'text-yellow-600 dark:text-yellow-400',
+  } as const;
   let capabilitiesLoading = false;
   let capabilitiesRequest = 0;
 
@@ -115,6 +141,7 @@
   onMount(() => {
     loadData();
     loadCapabilities();
+    loadChanges();
   });
 
   async function loadData() {
@@ -341,6 +368,42 @@
             </li>
           {/each}
         </ul>
+      </div>
+    {/if}
+
+    {#if isOrgAdmin}
+      <!-- Change history: who changed what in Arc through Launchpad -->
+      <div class="mb-6 rounded-lg border bg-card">
+        <div class="border-b px-4 py-3">
+          <h2 class="font-semibold">Change history</h2>
+          <p class="text-xs text-muted-foreground">Changes made to this Arc instance through Launchpad, and who made them. Visible to owners and admins.</p>
+        </div>
+        {#if changes.length === 0}
+          <div class="p-4 text-center text-sm text-muted-foreground">{changesLoading ? 'Loading…' : 'No changes recorded yet'}</div>
+        {:else}
+          <div class="divide-y">
+            {#each changes as change (change.id)}
+              <div class="flex flex-wrap items-center justify-between gap-2 px-4 py-2 text-sm">
+                <div class="flex min-w-0 items-center gap-2">
+                  <span class="w-14 shrink-0 font-mono text-xs font-semibold">{change.method}</span>
+                  <span class="truncate font-mono text-xs">{change.path}</span>
+                  <span class="shrink-0 text-xs {OUTCOME_CLASS[change.outcome]}">
+                    {change.status ?? 'no answer'}{change.outcome === 'unknown' ? ' (may have applied)' : ''}
+                  </span>
+                </div>
+                <div class="flex shrink-0 items-center gap-3 text-xs text-muted-foreground">
+                  <span>{change.actor ? change.actor.name || change.actor.email : 'Deleted user'}</span>
+                  <span>{formatDateTime(change.createdAt, $timezone)}</span>
+                </div>
+              </div>
+            {/each}
+          </div>
+          {#if changesMore}
+            <div class="border-t p-2 text-center">
+              <Button variant="ghost" size="sm" on:click={() => loadChanges(true)} disabled={changesLoading}>Load more</Button>
+            </div>
+          {/if}
+        {/if}
       </div>
     {/if}
 
