@@ -1,6 +1,7 @@
 import type { CapabilitiesView } from '$lib/capabilities';
 import type { ClusterViewData, NodeLogsData, NodeSnapshotData } from '$lib/cluster';
 import type { ChangePage } from '$lib/changeLog';
+import type { RbacChange, RbacSnapshot } from '$lib/rbac';
 
 export interface User {
   id: string;
@@ -351,4 +352,37 @@ export async function getInstanceChanges(orgId: string, id: string, before?: num
   const res = await apiFetch(`/api/v1/orgs/${encodeURIComponent(orgId)}/instances/${encodeURIComponent(id)}/changes${qs}`);
   if (!res.ok) throw new Error('Failed to load the change history');
   return res.json();
+}
+
+// ---------------------------------------------------------------------------
+// Access (Arc RBAC administration, #8)
+
+export class AccessApiError extends Error {
+  constructor(public readonly code: string, message: string, public readonly fields?: Record<string, string>) {
+    super(message);
+    this.name = 'AccessApiError';
+  }
+}
+
+async function accessFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await apiFetch(path, init);
+  if (res.ok) return res.json();
+  const body = (await res.json().catch(() => null)) as { error?: string; message?: string; fields?: Record<string, string> } | null;
+  const code = body?.message ? body.error ?? 'error' : res.status === 401 || res.status === 403 ? 'forbidden' : 'error';
+  throw new AccessApiError(code, body?.message ?? body?.error ?? `Request failed (${res.status})`, body?.fields);
+}
+
+const accessPath = (orgId: string, id: string) => `/api/v1/orgs/${encodeURIComponent(orgId)}/instances/${encodeURIComponent(id)}/access`;
+
+export function getAccess(orgId: string, id: string): Promise<RbacSnapshot> {
+  return accessFetch(accessPath(orgId, id));
+}
+
+export interface AccessChangeOutcome {
+  result: 'applied' | 'applied_after_error' | 'not_applied' | 'unknown';
+  snapshot: RbacSnapshot;
+}
+
+export function applyAccessChange(orgId: string, id: string, change: RbacChange, fingerprint: string): Promise<AccessChangeOutcome> {
+  return accessFetch(accessPath(orgId, id), { method: 'POST', body: JSON.stringify({ change, fingerprint }) });
 }
