@@ -1,5 +1,6 @@
 import type { CapabilitiesView } from '$lib/capabilities';
 import type { ClusterViewData, NodeLogsData, NodeSnapshotData } from '$lib/cluster';
+import type { ChangePage } from '$lib/changeLog';
 
 export interface User {
   id: string;
@@ -345,19 +346,9 @@ export function getNodeLogs(
 // ---------------------------------------------------------------------------
 // Instance change log: Arc changes made through Launchpad, with who made them.
 
-export interface InstanceChange {
-  id: number;
-  method: string;
-  path: string;
-  status: number | null;
-  outcome: 'ok' | 'error' | 'unknown';
-  createdAt: string;
-  actor: { id: string; email: string; name: string | null } | null;
-}
-
-export async function getInstanceChanges(orgId: string, id: string, beforeId?: number): Promise<InstanceChange[]> {
-  const qs = beforeId ? `?before=${beforeId}` : '';
-  const res = await apiFetch(`/api/v1/orgs/${orgId}/instances/${id}/changes${qs}`);
+export async function getInstanceChanges(orgId: string, id: string, before?: number): Promise<ChangePage> {
+  const qs = before !== undefined ? `?before=${before}` : '';
+  const res = await apiFetch(`/api/v1/orgs/${encodeURIComponent(orgId)}/instances/${encodeURIComponent(id)}/changes${qs}`);
   if (!res.ok) throw new Error('Failed to load the change history');
-  return (await res.json()).changes;
+  return res.json();
 }

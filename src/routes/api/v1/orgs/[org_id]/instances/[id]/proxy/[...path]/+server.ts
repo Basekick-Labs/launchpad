@@ -7,7 +7,7 @@ import { getInstance } from '$lib/server/instance';
 import { allowPrivateEndpoints } from '$lib/server/arcConnection';
 import { assertSafeResolvedUrl, type ResolvedTarget } from '$lib/server/ssrf';
 import { streamUpstreamWithFallback, ResponseTooLargeError } from '$lib/server/arcProxy';
-import { blockedReason, canonicalizePath, isAuditedChange, isMemberAllowed } from '$lib/server/proxyPolicy';
+import { canonicalizePath, isAuditedChange, isDryRun, isMemberAllowed, isNonChangeStatus } from '$lib/server/proxyPolicy';
 import { recordChange } from '$lib/server/instanceChangeLog';
 
 // Only these response headers from the upstream Arc server are forwarded back
@@ -44,10 +44,16 @@ async function proxyRequest(request: Request, params: { org_id: string; id: stri
   if (params.path.includes('..') || params.path.includes('\\')) {
     return json({ error: 'Invalid path' }, { status: 400 });
   }
-  const decodedPath = decodeURIComponent(params.path);
+  let decodedPath: string;
+  try {
+    decodedPath = decodeURIComponent(params.path);
+  } catch {
+    return json({ error: 'Invalid path' }, { status: 400 }); // a stray '%'
+  }
   if (decodedPath.includes('..') || decodedPath.includes('\\')) {
     return json({ error: 'Invalid path' }, { status: 400 });
   }
+  const actorUserId = locals.user.id;
 
   const db = getDb();
   const membership = db.prepare(
@@ -72,10 +78,6 @@ async function proxyRequest(request: Request, params: { org_id: string; id: stri
     if (!isMemberAllowed(request.method, canonicalPath)) {
       return json({ error: 'Forbidden' }, { status: 403 });
     }
-  }
-  const blocked = blockedReason(canonicalPath);
-  if (blocked) {
-    return json({ error: blocked }, { status: 403 });
   }
 
   const instance = getInstance(params.id);
@@ -126,14 +128,20 @@ async function proxyRequest(request: Request, params: { org_id: string; id: stri
     : null;
 
   const hostHeader = new URL(instance.endpoint_url).host;
-  // Changes are recorded with the Launchpad user once Arc's status is known
-  // (or with no status when Arc never answered). Never the body.
+  // Changes are recorded once, with the Launchpad user, when Arc's status is
+  // known (or with none when Arc never answered). Never the body; a 404/405
+  // changed nothing and is not recorded.
   const audited = isAuditedChange(request.method, canonicalPath);
+  const dryRun = audited && isDryRun(canonicalPath, body);
   const record = (status: number | null) => {
-    if (audited) recordChange({ instanceId: instance.id, actorUserId: locals.user!.id, method: request.method, path: canonicalPath, status });
+    if (audited && !(status !== null && isNonChangeStatus(status))) {
+      recordChange({ instanceId: instance.id, actorUserId, method: request.method, path: canonicalPath, status, dryRun });
+    }
   };
+
+  let result: Awaited<ReturnType<typeof streamUpstreamWithFallback>>;
   try {
-    const result = await streamUpstreamWithFallback(
+    result = await streamUpstreamWithFallback(
       {
         method: request.method,
         resolved,
@@ -156,8 +164,28 @@ async function proxyRequest(request: Request, params: { org_id: string; id: stri
       resolved.ips,
     );
 
-    record(result.status);
+  } catch (err: any) {
+    // A declared-too-large answer still carries Arc's status; anything else
+    // may have applied before failing, so it is recorded as unknown.
+    record(err instanceof ResponseTooLargeError ? err.status ?? null : null);
+    if (err instanceof ResponseTooLargeError) {
+      console.error('Proxy response too large:', {
+        org_id: params.org_id,
+        instance_id: params.id,
+        path: canonicalPath,
+        limit: err.limit,
+      });
+      return json(
+        { error: 'Arc response is too large to proxy. Narrow the query or add a LIMIT.' },
+        { status: 502 },
+      );
+    }
+    console.error('Proxy error:', err.message);
+    return json({ error: 'Proxy error' }, { status: 502 });
+  }
+  record(result.status);
 
+  try {
     // Force nosniff so a spoofed/omitted Content-Type can't be sniffed into
     // active content executing on the Launchpad origin.
     const respHeaders = {
@@ -173,21 +201,9 @@ async function proxyRequest(request: Request, params: { org_id: string; id: stri
       headers: respHeaders,
     });
   } catch (err: any) {
-    // Arc may have applied the change before the failure: recorded as unknown.
-    record(null);
-    if (err instanceof ResponseTooLargeError) {
-      console.error('Proxy response too large:', {
-        org_id: params.org_id,
-        instance_id: params.id,
-        path: canonicalPath,
-        limit: err.limit,
-      });
-      return json(
-        { error: 'Arc response is too large to proxy. Narrow the query or add a LIMIT.' },
-        { status: 502 },
-      );
-    }
-    console.error('Proxy error:', err.message);
+    // An unusable upstream header or status: release the upstream stream.
+    await result.body?.cancel().catch(() => {});
+    console.error('Proxy response error:', err.message);
     return json({ error: 'Proxy error' }, { status: 502 });
   }
 }

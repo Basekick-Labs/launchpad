@@ -116,9 +116,12 @@ function runMigrations(db: Database.Database) {
       path TEXT NOT NULL,
       status INTEGER,
       outcome TEXT NOT NULL,
+      -- A dry run (delete, retention or CQ execute preview): nothing changed.
+      dry_run INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     );
     CREATE INDEX IF NOT EXISTS idx_instance_change_log_instance ON instance_change_log(instance_id, id);
+    CREATE INDEX IF NOT EXISTS idx_instance_change_log_created ON instance_change_log(created_at);
 
     -- Key/value application settings written by the setup wizard / admin
     -- (e.g. email transport config). Values are JSON-encoded strings.

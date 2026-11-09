@@ -80,32 +80,32 @@ export function isMemberAllowed(method: string, canonicalPath: string): boolean 
 }
 
 /**
- * Arc routes the proxy refuses even to owners/admins, because Launchpad has
- * an audited place for them instead (#8): RBAC administration and a token's
- * team memberships and effective permissions. Changing who can read what in
- * Arc must leave a record of which Launchpad user did it; through the proxy
- * Arc would only ever see the instance's shared admin token.
+ * Requests that are data, not configuration: SQL (Arc runs reads over POST)
+ * and ingestion/imports. Recording each would bury the changes that matter.
+ * Data-changing SQL (DELETE, DDL) is therefore not in the change log.
  */
-const BLOCKED_PATTERNS: readonly RegExp[] = [
-  /^api\/v1\/rbac(\/|$)/,
-  /^api\/v1\/auth\/tokens\/[^/]+\/(teams|permissions)(\/|$)/,
-  /^api\/v1\/auth\/cache\/invalidate$/,
-];
+const UNAUDITED_POST_PREFIXES = ['api/v1/query', 'write', 'api/v1/write', 'api/v2/write', 'api/v1/import'];
 
-/** Why the proxy refuses this path for every role, or null. */
-export function blockedReason(canonicalPath: string): string | null {
-  return BLOCKED_PATTERNS.some((re) => re.test(canonicalPath))
-    ? 'Arc access control is managed from the Access tab, which records who made each change'
-    : null;
+/** Whether a proxied request changes Arc's configuration and belongs in the change log. */
+export function isAuditedChange(method: string, canonicalPath: string): boolean {
+  if (method === 'GET' || method === 'HEAD') return false;
+  return !(method === 'POST' && matchesPrefix(canonicalPath, UNAUDITED_POST_PREFIXES));
 }
 
-/**
- * Whether a proxied request changes something in Arc and so belongs in the
- * instance change log. Reads are not recorded, and neither are SQL queries:
- * Arc runs them over POST, they do not change configuration, and recording
- * every one would bury the changes that matter.
- */
-export function isAuditedChange(method: string, canonicalPath: string): boolean {
-  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return false;
-  return !matchesPrefix(canonicalPath, ['api/v1/query']);
+/** Arc routes that accept `dry_run` in the body: a preview, not a change. */
+const DRY_RUN_ROUTES = [/^api\/v1\/delete$/, /^api\/v1\/retention\/[^/]+\/execute$/, /^api\/v1\/continuous_queries\/[^/]+\/execute$/];
+
+/** Whether a request body asks one of those routes for a dry run. */
+export function isDryRun(canonicalPath: string, body: Uint8Array | null): boolean {
+  if (!body || body.length === 0 || body.length > 64 * 1024 || !DRY_RUN_ROUTES.some((re) => re.test(canonicalPath))) return false;
+  try {
+    return (JSON.parse(Buffer.from(body).toString('utf8')) as { dry_run?: unknown } | null)?.dry_run === true;
+  } catch {
+    return false;
+  }
+}
+
+/** A response that means nothing was changed (no such route or method). */
+export function isNonChangeStatus(status: number): boolean {
+  return status === 404 || status === 405;
 }

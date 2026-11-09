@@ -4,8 +4,9 @@
   import { goto } from '$app/navigation';
   import {
     getInstance, updateInstance, deleteInstance, getInstanceCapabilities, getInstanceChanges,
-    type Instance, type InstanceChange
+    type Instance
   } from '$lib/cloudApi';
+  import type { ChangeEntry } from '$lib/changeLog';
   import { describeCapability, tierLabel, type CapabilitiesView, type CapabilityState } from '$lib/capabilities';
   import { roleAtLeast } from '$lib/roles';
   import { Button } from '$lib/components/ui/button';
@@ -26,22 +27,36 @@
   let capabilities: CapabilitiesView | null = null;
 
   // Change history (owner/admin): Arc changes made through Launchpad, by whom.
-  let changes: InstanceChange[] = [];
-  let changesMore = false;
+  let changes: ChangeEntry[] = [];
+  let changesNext: number | null = null;
   let changesLoading = false;
+  let changesError = false;
+  let changesRequest = 0;
 
   async function loadChanges(more = false) {
     if (!org || !isOrgAdmin) return;
+    const request = ++changesRequest;
     changesLoading = true;
     try {
-      const page = await getInstanceChanges(org.id, instanceId, more ? changes[changes.length - 1]?.id : undefined);
-      changes = more ? [...changes, ...page] : page;
-      changesMore = page.length === 50;
+      const batch = await getInstanceChanges(org.id, instanceId, more ? changesNext ?? undefined : undefined);
+      if (request !== changesRequest) return;
+      changes = more ? [...changes, ...batch.changes] : batch.changes;
+      changesNext = batch.nextBefore;
+      changesError = false;
     } catch {
+      if (request !== changesRequest) return;
       if (more) toast.error('Could not load more history');
+      else changesError = true;
     } finally {
-      changesLoading = false;
+      if (request === changesRequest) changesLoading = false;
     }
+  }
+
+  // Reload when the page is reused for another instance.
+  $: if (instanceId && isOrgAdmin) {
+    changes = [];
+    changesNext = null;
+    loadChanges();
   }
 
   const OUTCOME_CLASS = {
@@ -141,7 +156,6 @@
   onMount(() => {
     loadData();
     loadCapabilities();
-    loadChanges();
   });
 
   async function loadData() {
@@ -373,38 +387,49 @@
 
     {#if isOrgAdmin}
       <!-- Change history: who changed what in Arc through Launchpad -->
-      <div class="mb-6 rounded-lg border bg-card">
+      <section class="mb-6 rounded-lg border bg-card" aria-labelledby="change-history-title">
         <div class="border-b px-4 py-3">
-          <h2 class="font-semibold">Change history</h2>
-          <p class="text-xs text-muted-foreground">Changes made to this Arc instance through Launchpad, and who made them. Visible to owners and admins.</p>
+          <h2 id="change-history-title" class="font-semibold">Change history</h2>
+          <p class="text-xs text-muted-foreground">
+            Configuration changes made to this Arc instance through Launchpad, and who made them. SQL and data
+            ingestion are not listed. Visible to owners and admins.
+          </p>
         </div>
-        {#if changes.length === 0}
-          <div class="p-4 text-center text-sm text-muted-foreground">{changesLoading ? 'Loading…' : 'No changes recorded yet'}</div>
+        {#if changesError && changes.length === 0}
+          <div class="flex items-center justify-center gap-3 p-4 text-sm text-destructive" role="status">
+            Could not load the change history.
+            <Button variant="outline" size="sm" on:click={() => loadChanges()}>Retry</Button>
+          </div>
+        {:else if changes.length === 0}
+          <div class="p-4 text-center text-sm text-muted-foreground" aria-live="polite" aria-busy={changesLoading}>
+            {changesLoading ? 'Loading…' : 'No changes recorded yet'}
+          </div>
         {:else}
-          <div class="divide-y">
+          <ul class="divide-y">
             {#each changes as change (change.id)}
-              <div class="flex flex-wrap items-center justify-between gap-2 px-4 py-2 text-sm">
+              <li class="flex flex-wrap items-center justify-between gap-2 px-4 py-2 text-sm">
                 <div class="flex min-w-0 items-center gap-2">
                   <span class="w-14 shrink-0 font-mono text-xs font-semibold">{change.method}</span>
-                  <span class="truncate font-mono text-xs">{change.path}</span>
+                  <span class="truncate font-mono text-xs" title={change.path}>{change.path}</span>
                   <span class="shrink-0 text-xs {OUTCOME_CLASS[change.outcome]}">
-                    {change.status ?? 'no answer'}{change.outcome === 'unknown' ? ' (may have applied)' : ''}
+                    {change.status ?? 'no answer'}{change.outcome === 'unknown' ? ' (may have applied, or still running)' : ''}
                   </span>
+                  {#if change.dryRun}<span class="shrink-0 text-xs text-muted-foreground">dry run</span>{/if}
                 </div>
                 <div class="flex shrink-0 items-center gap-3 text-xs text-muted-foreground">
                   <span>{change.actor ? change.actor.name || change.actor.email : 'Deleted user'}</span>
-                  <span>{formatDateTime(change.createdAt, $timezone)}</span>
+                  <time datetime={change.createdAt}>{formatDateTime(change.createdAt, $timezone)}</time>
                 </div>
-              </div>
+              </li>
             {/each}
-          </div>
-          {#if changesMore}
+          </ul>
+          {#if changesNext !== null}
             <div class="border-t p-2 text-center">
               <Button variant="ghost" size="sm" on:click={() => loadChanges(true)} disabled={changesLoading}>Load more</Button>
             </div>
           {/if}
         {/if}
-      </div>
+      </section>
     {/if}
 
     <!-- Events -->

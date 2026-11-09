@@ -452,3 +452,35 @@ describe('streamUpstream https to an IP literal', () => {
     expect(err.code).not.toBe('ERR_INVALID_ARG_VALUE');
   });
 });
+
+describe('streamUpstreamWithFallback retries', () => {
+  // A server that receives the request and then resets the connection: Arc
+  // may well have applied it.
+  async function resetting(): Promise<{ port: number; hits: () => number }> {
+    let n = 0;
+    const port = await upstream((req) => {
+      n++;
+      req.socket.destroy();
+    });
+    return { port, hits: () => n };
+  }
+
+  const both = (port: number): ResolvedTarget => ({ ...target(port), ips: ['127.0.0.1', '127.0.0.1'] });
+  const run = (port: number, method: string) =>
+    streamUpstreamWithFallback(
+      { method, resolved: both(port), hostHeader: `localhost:${port}`, path: 'api/v1/delete', headers: {}, body: method === 'GET' ? null : Buffer.from('{}'), headerTimeoutMs: 1500 },
+      both(port).ips,
+    );
+
+  it('does not resend a change after the server may have received it', async () => {
+    const s = await resetting();
+    await expect(run(s.port, 'POST')).rejects.toBeTruthy();
+    expect(s.hits()).toBe(1);
+  });
+
+  it('still retries a read on the next address', async () => {
+    const s = await resetting();
+    await expect(run(s.port, 'GET')).rejects.toBeTruthy();
+    expect(s.hits()).toBe(2);
+  });
+});

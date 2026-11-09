@@ -87,7 +87,8 @@ export interface UpstreamResponse {
 }
 
 export class ResponseTooLargeError extends Error {
-  constructor(readonly limit: number) {
+  /** `status` is Arc's answer when it declared the oversized length up front. */
+  constructor(readonly limit: number, readonly status?: number) {
     super(`upstream response exceeds ${limit} bytes`);
     this.name = 'ResponseTooLargeError';
   }
@@ -173,7 +174,7 @@ export function streamUpstream(opts: StreamUpstreamOptions): Promise<UpstreamRes
         if (Number.isFinite(declared) && declared > maxResponseBytes) {
           res.resume();
           req.destroy();
-          reject(new ResponseTooLargeError(maxResponseBytes));
+          reject(new ResponseTooLargeError(maxResponseBytes, status));
           return;
         }
 
@@ -236,6 +237,11 @@ export async function streamUpstreamWithFallback(
   opts: Omit<StreamUpstreamOptions, 'ip'>,
   ips: readonly string[],
 ): Promise<UpstreamResponse> {
+  // A GET/HEAD can be retried on the next IP after any failure. Anything
+  // else only when the connection never opened: after a timeout or a reset,
+  // Arc may already have applied the request, and resending it would apply
+  // it twice (a delete, an import, a retention run).
+  const idempotent = opts.method === 'GET' || opts.method === 'HEAD';
   let lastErr: unknown;
   for (const ip of ips) {
     try {
@@ -243,7 +249,11 @@ export async function streamUpstreamWithFallback(
     } catch (err) {
       if (err instanceof ResponseTooLargeError) throw err;
       lastErr = err;
+      if (!idempotent && !NOT_SENT_CODES.has((err as { code?: string }).code ?? '')) throw err;
     }
   }
   throw lastErr ?? new Error('Proxy error');
 }
+
+/** Connection errors that prove the request never reached the server. */
+const NOT_SENT_CODES = new Set(['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'EADDRNOTAVAIL']);
