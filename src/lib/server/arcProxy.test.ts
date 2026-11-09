@@ -440,3 +440,13 @@ describe('non-2xx passthrough', () => {
     await drain(result.body);
   });
 });
+
+describe('streamUpstream https to an IP literal', () => {
+  it('reaches the TLS handshake instead of failing on an IP servername', async () => {
+    const port = await upstream((_req, res) => res.end('plain http'));
+    const resolved: ResolvedTarget = { ip: '127.0.0.1', ips: ['127.0.0.1'], hostname: '127.0.0.1', port, protocol: 'https:' };
+    // Plain-HTTP upstream: the handshake fails (EPROTO). Before the fix Node
+    // rejected the request options outright for using an IP as SNI.
+    await expect(call(port, { resolved })).rejects.toMatchObject({ code: 'EPROTO' });
+  });
+});

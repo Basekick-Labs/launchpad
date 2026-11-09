@@ -69,3 +69,11 @@ describe('safeRequest signal', () => {
     await expect(safeRequest(`${base}/small`, { ...opts, signal: AbortSignal.abort() })).rejects.toBeTruthy();
   });
 });
+
+describe('safeRequest https to an IP literal', () => {
+  it('fails on the TLS handshake, not on an invalid SNI option', async () => {
+    // The server speaks plain HTTP, so the handshake fails; before the fix the
+    // request never got that far (Node rejects an IP as servername).
+    await expect(safeRequest(base.replace('http:', 'https:') + '/small', opts)).rejects.toMatchObject({ code: 'EPROTO' });
+  });
+});

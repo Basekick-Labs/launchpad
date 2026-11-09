@@ -312,7 +312,9 @@ export async function safeRequest(
       const req = mod.request(
         {
           host: ip, // dial a validated pinned IP, not the (re-resolvable) hostname
-          servername: target.protocol === 'https:' ? target.hostname : undefined, // TLS SNI
+          // TLS SNI. Node refuses an IP literal as servername, and SNI is for
+          // names anyway: an https endpoint given by IP must not send one.
+          servername: target.protocol === 'https:' && net.isIP(target.hostname) === 0 ? target.hostname : undefined,
           port: target.port,
           path: opts.path ?? (url.pathname + url.search),
           method,
