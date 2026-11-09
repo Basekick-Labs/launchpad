@@ -261,6 +261,8 @@ function runMigrations(db: Database.Database) {
   ensureColumn(db, 'instances', 'detected_arc_version', 'TEXT');
   // Scheme for reaching cluster nodes directly (#7); NULL = the endpoint's.
   ensureColumn(db, 'instances', 'node_scheme', 'TEXT');
+  // Added after the table first shipped to dev databases.
+  ensureColumn(db, 'instance_change_log', 'dry_run', 'INTEGER NOT NULL DEFAULT 0');
 }
 
 /** Idempotently add a column if the table doesn't already have it. */

@@ -78,3 +78,16 @@ describe('purgeOldChanges', () => {
     expect(listChanges('i1', null).changes.map((c) => c.path)).toEqual(['/new']);
   });
 });
+
+describe('migration', () => {
+  it('adds dry_run to a table created before the column existed', async () => {
+    const Database = (await import('better-sqlite3')).default;
+    const old = new Database(':memory:');
+    old.exec(`CREATE TABLE instance_change_log (id INTEGER PRIMARY KEY, instance_id TEXT, actor_user_id TEXT, method TEXT, path TEXT, status INTEGER, outcome TEXT, created_at TEXT)`);
+    const cols = () => (old.prepare('PRAGMA table_info(instance_change_log)').all() as Array<{ name: string }>).map((c) => c.name);
+    expect(cols()).not.toContain('dry_run');
+    // Same statement db.ts runs on start.
+    old.exec('ALTER TABLE instance_change_log ADD COLUMN dry_run INTEGER NOT NULL DEFAULT 0');
+    expect(cols()).toContain('dry_run');
+  });
+});
