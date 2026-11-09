@@ -117,7 +117,9 @@
   };
 </script>
 
-<div class="flex h-full flex-col overflow-auto p-4">
+<!-- Sections keep their height (shrink-0 on each): in a flex column, the table's
+     overflow-x-auto wrapper would otherwise collapse once the node detail grows. -->
+<div class="flex h-full flex-col overflow-auto p-4 [&>*]:shrink-0">
   <div class="mb-4 flex items-center justify-between gap-4">
     <div>
       <h2 class="text-lg font-semibold">Cluster</h2>
