@@ -199,7 +199,8 @@ function endpointBase(t: ClusterTarget): string {
   return base;
 }
 
-function fingerprint(t: ClusterTarget, opts: ClusterOptions): string {
+/** Cache key part for one connection as the cluster code sees it. */
+export function fingerprint(t: ClusterTarget, opts: ClusterOptions): string {
   return connectionFingerprint(t.id, t.endpoint_url, t.admin_token, t.node_scheme ?? '', String(opts.allowPrivate));
 }
 
@@ -485,4 +486,77 @@ export function getNodeLogs(t: ClusterTarget, nodeId: string, q: NodeLogsQuery, 
 export function resetClusterCachesForTests(): void {
   for (const c of [topologyCache, reachCache, identityCache, metricsCache, seriesCache, logsCache, endpointIpCache]) c.clear();
   lastLogged.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Every node, for features Arc does not replicate (query governance, #10)
+
+export interface PinnedNode {
+  nodeId: string;
+  /** Compactors forward queries before Arc's governance runs. */
+  servesQueries: boolean;
+  /** Where to send requests, and the vetted IP to pin them to; null when not reachable. */
+  target: { origin: string; ip: string; display: string } | null;
+  /** Why `target` is null. */
+  error: ClusterErrorCode | null;
+}
+
+/**
+ * The instance's nodes, each resolved with the same address scope and
+ * identity check as the Cluster view. A standalone instance is one node: the
+ * endpoint itself (nothing to verify it against). In a cluster, a node that
+ * cannot be reached is never swapped for the load-balanced endpoint, so a
+ * write can never land on a random node.
+ */
+export async function pinnedNodes(t: ClusterTarget, opts: ClusterOptions): Promise<PinnedNode[]> {
+  const topo = await getTopology(t, opts);
+  if (!topo.status.enabled) {
+    const base = endpointBase(t);
+    let display: string;
+    try {
+      display = new URL(base).host;
+    } catch {
+      throw new ClusterError('bad_address', 'The endpoint URL is not valid');
+    }
+    const ip = await endpointIp(t, opts);
+    return [{ nodeId: 'standalone', servesQueries: true, target: { origin: base, ip, display }, error: null }];
+  }
+  const status = topo.status;
+  const signal = AbortSignal.timeout(NODE_DEADLINE_MS);
+  return Promise.all(status.nodes.map(async (node): Promise<PinnedNode> => {
+    const servesQueries = node.role !== 'compactor';
+    try {
+      const r = await resolveNode(t, node, opts, signal);
+      await verifyIdentity(t, status, r, opts);
+      return { nodeId: node.id, servesQueries, target: { origin: r.origin, ip: r.ip, display: r.display }, error: null };
+    } catch (err) {
+      return { nodeId: node.id, servesQueries, target: null, error: toClusterError(err).code };
+    }
+  }));
+}
+
+export interface NodeAnswer {
+  status: number;
+  /** Parsed JSON, or null when the body is not JSON. */
+  body: unknown;
+  /** Arc's `error` string, cut short; for matching only, never shown. */
+  message: string | null;
+}
+
+/**
+ * GET a path on one pinned node with the admin token. Transport failures
+ * throw a ClusterError (unexpected ones are logged by toClusterError).
+ */
+export async function pinnedGet(
+  target: { origin: string; ip: string },
+  path: string,
+  t: ClusterTarget,
+  opts: ClusterOptions,
+  signal: AbortSignal,
+  maxBytes: number,
+): Promise<NodeAnswer> {
+  const res = await wrap(get(`${target.origin}${path}`, opts, { token: t.admin_token, signal, maxBytes, pinTo: target.ip }));
+  const body = parseJson(res.body);
+  const err = typeof body === 'object' && body !== null ? (body as { error?: unknown }).error : undefined;
+  return { status: res.status, body, message: typeof err === 'string' ? err.slice(0, 300) : null };
 }
