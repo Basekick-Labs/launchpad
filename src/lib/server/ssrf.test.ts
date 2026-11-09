@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isPrivateIp, isSafeUrl, isSafeWebhookUrl } from './ssrf';
+import { isPrivateIp, isSafeUrl, isSafeWebhookUrl, classifyIp, parseCidr, ipInCidr, assertSafeResolvedUrl } from './ssrf';
 
 // The whole point of classifying on parsed BYTES rather than the textual form
 // is that no re-spelling of an address can slip past the blocklist. These
@@ -166,5 +166,63 @@ describe('isSafeWebhookUrl', () => {
   it('rejects private targets', () => {
     expect(isSafeWebhookUrl('https://127.0.0.1/abc')).toBe(false);
     expect(isSafeWebhookUrl('https://169.254.169.254/latest/meta-data')).toBe(false);
+  });
+});
+
+describe('classifyIp', () => {
+  it('separates loopback, private and public', () => {
+    expect(['127.0.0.1', '::1', '::ffff:127.0.0.1'].map(classifyIp)).toEqual(['loopback', 'loopback', 'loopback']);
+    expect(['10.0.0.5', '172.20.1.1', '192.168.1.9', '100.64.0.1', 'fd00::1'].map(classifyIp)).toEqual(
+      ['private', 'private', 'private', 'private', 'private'],
+    );
+    expect(['8.8.8.8', '2606:4700::1111'].map(classifyIp)).toEqual(['public', 'public']);
+  });
+
+  it('forbids metadata, link-local, unspecified, multicast and garbage in any spelling', () => {
+    for (const ip of ['169.254.169.254', '::ffff:169.254.169.254', '::ffff:a9fe:a9fe', '0.0.0.0', '::', 'fe80::1%eth0', '224.0.0.1', 'ff02::1', 'not-an-ip']) {
+      expect(classifyIp(ip)).toBe('forbidden');
+    }
+  });
+});
+
+describe('classifyIp boundaries', () => {
+  it('splits ranges at their edges', () => {
+    expect(['172.15.255.255', '172.16.0.0', '172.31.255.255', '172.32.0.0'].map(classifyIp)).toEqual(['public', 'private', 'private', 'public']);
+    expect(['100.63.255.255', '100.64.0.0', '100.127.255.255', '100.128.0.0'].map(classifyIp)).toEqual(['public', 'private', 'private', 'public']);
+    expect(['fec0::1', '2002:7f00:1::', '64:ff9b::a9fe:a9fe'].map(classifyIp)).toEqual(['private', 'loopback', 'forbidden']);
+  });
+
+  it('agrees with isPrivateIp: private means anything but public', () => {
+    for (const ip of ['8.8.8.8', '10.0.0.1', '127.0.0.1', '169.254.169.254', '::1', '::', 'fe80::1', 'ff02::1', 'fd00::1', '2606:4700::1111', 'nope']) {
+      expect(isPrivateIp(ip)).toBe(classifyIp(ip) !== 'public');
+    }
+  });
+});
+
+describe('forbidden targets with private endpoints allowed', () => {
+  it('still refuses metadata, unspecified and multicast literals', async () => {
+    for (const url of ['http://169.254.169.254/latest', 'http://0.0.0.0:8000', 'http://[ff02::1]:80']) {
+      expect(isSafeUrl(url, { allowHttp: true, allowPrivate: true })).toBe(false);
+      await expect(assertSafeResolvedUrl(url, { allowHttp: true, allowPrivate: true })).rejects.toThrow(/forbidden/);
+    }
+    expect(isSafeUrl('http://10.0.0.5:8000', { allowHttp: true, allowPrivate: true })).toBe(true);
+  });
+});
+
+describe('CIDR matching', () => {
+  it('parses and matches both families, including IPv4-mapped IPv6', () => {
+    const pods = parseCidr('10.42.0.0/16')!;
+    expect(ipInCidr('10.42.3.7', pods)).toBe(true);
+    expect(ipInCidr('10.43.0.1', pods)).toBe(false);
+    expect(ipInCidr('::ffff:10.42.3.7', pods)).toBe(true);
+    const ula = parseCidr('fd00:1::/32')!;
+    expect(ipInCidr('fd00:1::5', ula)).toBe(true);
+    expect(ipInCidr('fd00:2::5', ula)).toBe(false);
+    expect(ipInCidr('10.42.3.7', ula)).toBe(false);
+    expect(ipInCidr('10.0.0.1', parseCidr('0.0.0.0/0')!)).toBe(true);
+  });
+
+  it('rejects malformed CIDRs', () => {
+    for (const bad of ['10.0.0.0', '10.0.0.0/33', 'x/8', '::/129', '10.0.0.0/ 8']) expect(parseCidr(bad)).toBeNull();
   });
 });

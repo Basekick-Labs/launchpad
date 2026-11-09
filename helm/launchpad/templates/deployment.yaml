@@ -53,6 +53,10 @@ spec:
             - name: LAUNCHPAD_ALLOW_PRIVATE_ENDPOINTS
               value: "true"
             {{- end }}
+            {{- with .Values.clusterNodeCidrs }}
+            - name: LAUNCHPAD_CLUSTER_NODE_CIDRS
+              value: {{ join "," . | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

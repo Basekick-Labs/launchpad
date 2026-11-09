@@ -51,7 +51,8 @@ If your Arc server legitimately runs on a private network reachable from the Lau
 
 | Variable | Purpose |
 |---|---|
-| `LAUNCHPAD_ALLOW_PRIVATE_ENDPOINTS` | Set to `true` to allow registering Arc instances on private/localhost addresses. Default `false` (blocked). Even when enabled, the proxy still resolves-and-pins the target IP per request (DNS-rebinding safe). |
+| `LAUNCHPAD_ALLOW_PRIVATE_ENDPOINTS` | Set to `true` to allow registering Arc instances on private/localhost addresses. Default `false` (blocked). Even when enabled, the proxy still resolves-and-pins the target IP per request (DNS-rebinding safe), and cloud-metadata, link-local, unspecified and multicast addresses stay blocked. |
+| `LAUNCHPAD_CLUSTER_NODE_CIDRS` | Comma-separated CIDRs Launchpad may contact for per-node metrics and logs of an Arc cluster (e.g. `10.42.0.0/16` for the k3s pod network). Default: only nodes on the instance endpoint's own /24 (IPv4) or /64 (IPv6). Set by the operator; tenants cannot widen it. |
 
 Without it, registering (or health-checking) a private Arc endpoint fails with a "private/localhost endpoint blocked" error.
 

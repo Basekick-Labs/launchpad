@@ -55,54 +55,94 @@ function parseIpv6Bytes(ip: string): number[] | null {
   return bytes;
 }
 
-// True if 4 IPv4 bytes fall in a private/reserved/metadata range.
-function isPrivateIpv4Bytes(b: number[]): boolean {
+export type IpClass = 'loopback' | 'private' | 'public' | 'forbidden';
+
+function classifyIpv4Bytes(b: number[]): IpClass {
   const [a, c] = b;
-  if (a === 127) return true;                    // 127.0.0.0/8 loopback
-  if (a === 10) return true;                      // 10/8
-  if (a === 172 && c >= 16 && c <= 31) return true; // 172.16/12
-  if (a === 192 && c === 168) return true;        // 192.168/16
-  if (a === 169 && c === 254) return true;        // 169.254/16 link-local / IMDS
-  if (a === 100 && c >= 64 && c <= 127) return true; // 100.64/10 CGNAT
-  if (a === 0) return true;                        // 0/8 "this" network
-  if (a >= 224) return true;                       // 224/4 multicast + 240/4 reserved
-  return false;
+  if (a === 127) return 'loopback';
+  if (a === 0 || a >= 224) return 'forbidden';        // "this" network, multicast, reserved
+  if (a === 169 && c === 254) return 'forbidden';     // link-local / cloud metadata
+  if (a === 10 || (a === 172 && c >= 16 && c <= 31) || (a === 192 && c === 168) || (a === 100 && c >= 64 && c <= 127)) {
+    return 'private';
+  }
+  return 'public';
 }
 
 /**
- * True if the given IP literal falls in a private/reserved/metadata range.
- * Works on the 16-byte (IPv6) / 4-byte (IPv4) value, not the textual form, so
- * no re-spelling (compressed, expanded, mapped hex/dotted, 6to4, NAT64) can
- * slip a loopback/RFC1918/metadata address past it. Unparseable → unsafe.
+ * Coarse class of an IP literal, on bytes like {@link isPrivateIp}. Unlike
+ * that check, this splits loopback from private and singles out addresses no
+ * outbound request should reach even when private targets are allowed:
+ * link-local (cloud metadata), unspecified, multicast. Unparseable → forbidden.
  */
-export function isPrivateIp(ip: string): boolean {
-  const bare = ip.replace(/%.*$/, ''); // strip zone id (fe80::1%eth0)
+export function classifyIp(ip: string): IpClass {
+  const bare = ip.replace(/%.*$/, '');
   const v4 = parseIpv4Bytes(bare);
-  if (v4) return isPrivateIpv4Bytes(v4);
-
+  if (v4) return classifyIpv4Bytes(v4);
   const b = parseIpv6Bytes(bare);
-  if (!b) return true; // not a valid IP → treat as unsafe
-
-  // Loopback ::1 and unspecified ::
-  if (b.every((x, i) => x === (i === 15 ? 1 : 0))) return true;
-  if (b.every((x) => x === 0)) return true;
-  // IPv4-mapped ::ffff:0:0/96 and IPv4-compatible ::/96 — classify embedded v4.
+  if (!b) return 'forbidden';
+  if (b.every((x) => x === 0)) return 'forbidden';                         // ::
+  if (b.every((x, i) => x === (i === 15 ? 1 : 0))) return 'loopback';      // ::1
   const first10Zero = b.slice(0, 10).every((x) => x === 0);
   if (first10Zero && ((b[10] === 0xff && b[11] === 0xff) || (b[10] === 0 && b[11] === 0))) {
-    return isPrivateIpv4Bytes(b.slice(12, 16));
+    return classifyIpv4Bytes(b.slice(12, 16));
   }
-  // 6to4 2002::/16 embeds an IPv4 in bytes 2..5 — classify it.
-  if (b[0] === 0x20 && b[1] === 0x02) return isPrivateIpv4Bytes(b.slice(2, 6));
-  // NAT64 64:ff9b::/96 embeds an IPv4 in the last 4 bytes.
-  if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b) {
-    return isPrivateIpv4Bytes(b.slice(12, 16));
+  if (b[0] === 0x20 && b[1] === 0x02) return classifyIpv4Bytes(b.slice(2, 6));
+  if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b) return classifyIpv4Bytes(b.slice(12, 16));
+  if (b[0] === 0xff) return 'forbidden';                                    // multicast
+  if (b[0] === 0xfe && (b[1] & 0xc0) === 0x80) return 'forbidden';          // fe80::/10 link-local
+  if ((b[0] & 0xfe) === 0xfc || (b[0] === 0xfe && (b[1] & 0xc0) === 0xc0)) return 'private';
+  return 'public';
+}
+
+/**
+ * True if the given IP literal is anything but a public unicast address:
+ * loopback, RFC1918/ULA/CGNAT, link-local/metadata, unspecified, multicast,
+ * or unparseable. Same byte-level table as {@link classifyIp}, so no
+ * re-spelling (compressed, mapped, 6to4, NAT64) slips past either.
+ */
+export function isPrivateIp(ip: string): boolean {
+  return classifyIp(ip) !== 'public';
+}
+
+/**
+ * Parse "a.b.c.d/n" or "v6/n" into bytes and prefix length; null if invalid.
+ * IPv4 CIDRs also match IPv4-mapped IPv6 addresses via {@link ipInCidr}.
+ */
+export function parseCidr(cidr: string): { bytes: number[]; bits: number } | null {
+  const m = /^([^/\s]+)\/(\d{1,3})$/.exec(cidr.trim());
+  if (!m) return null;
+  const bits = Number(m[2]);
+  const v4 = parseIpv4Bytes(m[1]);
+  if (v4) return bits <= 32 ? { bytes: v4, bits } : null;
+  const v6 = parseIpv6Bytes(m[1]);
+  return v6 && bits <= 128 ? { bytes: v6, bits } : null;
+}
+
+function ipBytes(ip: string): number[] | null {
+  const bare = ip.replace(/%.*$/, '');
+  const v4 = parseIpv4Bytes(bare);
+  if (v4) return v4;
+  const b = parseIpv6Bytes(bare);
+  if (!b) return null;
+  // IPv4-mapped (::ffff:a.b.c.d) compares as IPv4.
+  if (b.slice(0, 10).every((x) => x === 0) && b[10] === 0xff && b[11] === 0xff) return b.slice(12, 16);
+  return b;
+}
+
+/** Whether an IP literal falls inside a parsed CIDR (same family only). */
+export function ipInCidr(ip: string, cidr: { bytes: number[]; bits: number }): boolean {
+  const b = ipBytes(ip);
+  if (!b || b.length !== cidr.bytes.length) return false;
+  for (let bit = 0; bit < cidr.bits; bit++) {
+    const mask = 0x80 >> (bit % 8);
+    if ((b[bit >> 3] & mask) !== (cidr.bytes[bit >> 3] & mask)) return false;
   }
-  // ULA fc00::/7 (fc00–fdff).
-  if ((b[0] & 0xfe) === 0xfc) return true;
-  // Link-local fe80::/10 and site-local fec0::/10.
-  if (b[0] === 0xfe && (b[1] & 0xc0) === 0x80) return true; // fe80::/10 link-local
-  if (b[0] === 0xfe && (b[1] & 0xc0) === 0xc0) return true; // fec0::/10 site-local
-  return false;
+  return true;
+}
+
+/** TLS SNI for a hostname: names only. Node rejects an IP literal as servername. */
+export function sniFor(hostname: string): string | undefined {
+  return net.isIP(hostname) === 0 ? hostname : undefined;
 }
 
 /** Reject obviously-unsafe hostnames (localhost, .local, .internal, metadata). */
@@ -137,10 +177,12 @@ export function isSafeUrl(rawUrl: string, opts: SafeUrlOptions = {}): boolean {
   }
   const allowed = opts.allowHttp ? ['http:', 'https:'] : ['https:'];
   if (!allowed.includes(url.protocol)) return false;
-  if (opts.allowPrivate) return true;
-
   // Strip IPv6 brackets for the literal check.
   const host = url.hostname.replace(/^\[|\]$/g, '');
+  // Metadata/link-local, unspecified and multicast are never a valid target,
+  // even when private endpoints are allowed.
+  if (net.isIP(host) !== 0 && classifyIp(host) === 'forbidden') return false;
+  if (opts.allowPrivate) return true;
   if (isBlockedHostname(host)) return false;
   if (net.isIP(host) !== 0 && isPrivateIp(host)) return false;
   return true;
@@ -174,6 +216,16 @@ const RESOLUTION_TTL_MS = 30_000;
 const resolutionCache = new Map<string, { ips: string[]; expiresAt: number }>();
 
 /**
+ * Refuse an address: forbidden (metadata, link-local, unspecified,
+ * multicast) always; any non-public one unless private targets are allowed.
+ */
+function assertAllowedIp(ip: string, opts: SafeUrlOptions): void {
+  const cls = classifyIp(ip);
+  if (cls === 'forbidden') throw new Error('Target resolves to a forbidden address');
+  if (!opts.allowPrivate && cls !== 'public') throw new Error('Target resolves to a private address');
+}
+
+/**
  * Resolve a URL's hostname and validate EVERY resolved address against the
  * private-range blocklist, then return a target pinned to a safe IP. Throws
  * if the URL is malformed, the scheme is disallowed, the hostname is blocked,
@@ -205,9 +257,7 @@ export async function assertSafeResolvedUrl(
 
   // If the host is already an IP literal, validate it directly (no DNS, no cache).
   if (net.isIP(hostname) !== 0) {
-    if (!opts.allowPrivate && isPrivateIp(hostname)) {
-      throw new Error('Target resolves to a private address');
-    }
+    assertAllowedIp(hostname, opts);
     return { ip: hostname, ips: [hostname], hostname, port, protocol };
   }
 
@@ -225,13 +275,7 @@ export async function assertSafeResolvedUrl(
   // dual-stack host that resolves ::1 first but only listens on 127.0.0.1.
   const records = await dns.lookup(hostname, { all: true });
   if (records.length === 0) throw new Error('Target host did not resolve');
-  if (!opts.allowPrivate) {
-    for (const r of records) {
-      if (isPrivateIp(r.address)) {
-        throw new Error('Target resolves to a private address');
-      }
-    }
-  }
+  for (const r of records) assertAllowedIp(r.address, opts);
   const ips = records.map((r) => r.address);
   // Bound the cache: drop expired entries once it grows past a small cap
   // (endpoints are operator-configured, so N is normally tiny).
@@ -267,6 +311,12 @@ export interface SafeRequestOptions extends SafeUrlOptions {
    * is the overall deadline.
    */
   signal?: AbortSignal;
+  /**
+   * Connect to exactly this IP, which the caller has already resolved and
+   * vetted, instead of resolving the URL's host again. It is still checked
+   * against the allowPrivate/forbidden policy, and no other IP is tried.
+   */
+  pinTo?: string;
 }
 
 export interface SafeResponse {
@@ -283,6 +333,17 @@ export interface SafeResponse {
  * timeout, oversized response, or transport error. This is the single shared
  * outbound primitive for the proxy, alert queries, health checks, and webhooks.
  */
+function pinnedTarget(rawUrl: string, ip: string, opts: SafeRequestOptions): ResolvedTarget {
+  const url = new URL(rawUrl);
+  const allowed = opts.allowHttp ? ['http:', 'https:'] : ['https:'];
+  if (!allowed.includes(url.protocol)) throw new Error(`Disallowed URL scheme: ${url.protocol}`);
+  if (net.isIP(ip) === 0) throw new Error('pinTo must be an IP address');
+  assertAllowedIp(ip, opts);
+  const protocol = url.protocol as 'http:' | 'https:';
+  const port = url.port ? Number(url.port) : protocol === 'https:' ? 443 : 80;
+  return { ip, ips: [ip], hostname: url.hostname.replace(/^\[|\]$/g, ''), port, protocol };
+}
+
 /** dns.lookup cannot be cancelled; race it so an abort deadline still holds. */
 function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -301,7 +362,9 @@ export async function safeRequest(
     throw new Error('truncateResponseAt must be a non-negative integer');
   }
   signal?.throwIfAborted();
-  const target = signal ? await raceAbort(assertSafeResolvedUrl(rawUrl, opts), signal) : await assertSafeResolvedUrl(rawUrl, opts);
+  const target = opts.pinTo !== undefined
+    ? pinnedTarget(rawUrl, opts.pinTo, opts)
+    : signal ? await raceAbort(assertSafeResolvedUrl(rawUrl, opts), signal) : await assertSafeResolvedUrl(rawUrl, opts);
   const url = new URL(rawUrl);
   const mod = target.protocol === 'https:' ? https : http;
   const timeoutMs = opts.timeoutMs ?? 15_000;
@@ -312,7 +375,7 @@ export async function safeRequest(
       const req = mod.request(
         {
           host: ip, // dial a validated pinned IP, not the (re-resolvable) hostname
-          servername: target.protocol === 'https:' ? target.hostname : undefined, // TLS SNI
+          servername: target.protocol === 'https:' ? sniFor(target.hostname) : undefined,
           port: target.port,
           path: opts.path ?? (url.pathname + url.search),
           method,

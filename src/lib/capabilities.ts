@@ -460,13 +460,6 @@ export function viewForRole(caps: InstanceCapabilities, role: string, now = Date
   };
 }
 
-/**
- * Navigation/action gate for #7–#14: true only when the caller may see the
- * capability and the instance serves it. Unknown is not usable.
- */
-export function capabilityUsable(view: CapabilitiesView | null, id: CapabilityId): boolean {
-  return view?.capabilities.find((c) => c.id === id)?.state === 'available';
-}
 
 /** Arc's API still sends the original identifiers (internal/license/license.go). */
 const TIER_LABELS: Record<string, string> = {
@@ -484,6 +477,20 @@ const TIER_LABELS: Record<string, string> = {
 export function tierLabel(tier: string | null): string | null {
   if (!tier || tier === 'oss') return null;
   return TIER_LABELS[tier] ?? tier;
+}
+
+/**
+ * Navigation/action gate: true when the caller may see the capability and
+ * its state is one of `states`. Unknown is never usable.
+ */
+export function capabilityIn(view: CapabilitiesView | null, id: CapabilityId, states: readonly CapabilityState[]): boolean {
+  const c = view?.capabilities.find((x) => x.id === id);
+  return !!c && states.includes(c.state);
+}
+
+/** The common case of {@link capabilityIn}: the instance serves it. */
+export function capabilityUsable(view: CapabilitiesView | null, id: CapabilityId): boolean {
+  return capabilityIn(view, id, ['available']);
 }
 
 /** One-line explanation for a capability state, for the UI. */

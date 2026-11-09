@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
+  import { goto } from '$app/navigation';
   import { getConnectionInfo, getInstanceCapabilities, type ConnectionInfo } from '$lib/cloudApi';
-  import { capabilityUsable, type CapabilitiesView, type CapabilityId } from '$lib/capabilities';
+  import { capabilityIn, type CapabilitiesView, type CapabilityId, type CapabilityState } from '$lib/capabilities';
   import { roleAtLeast } from '$lib/roles';
   import { ArcClient, type QueryResult } from '$lib/arcClient';
   import SQLConsole from '$lib/components/SQLConsole.svelte';
@@ -18,7 +19,7 @@
   import { Button } from '$lib/components/ui/button';
   import {
     ArrowLeft, Terminal, Activity, FileText, Database,
-    Clock, BarChart3, Key, Bell, Radio
+    Clock, BarChart3, Key, Bell, Radio, Network
   } from 'lucide-svelte';
 
   export let data: any;
@@ -31,11 +32,29 @@
   let loading = true;
   let error = '';
 
-  type ViewId = 'console' | 'monitoring' | 'logs' | 'retention' | 'continuous-queries' | 'alerts' | 'mqtt' | 'tokens';
+  type ViewId = 'console' | 'monitoring' | 'logs' | 'retention' | 'continuous-queries' | 'alerts' | 'mqtt' | 'tokens' | 'cluster';
   let activeView: ViewId = 'console';
+  /**
+   * The tab named in ?view=, kept in the URL so a reload or a shared link opens
+   * it. Capability tabs only become visible once discovery answers, so the
+   * request waits until the tab exists.
+   */
+  let requestedView: string | null = $page.url.searchParams.get('view');
+  $: if (requestedView && visibleTabs.some((t) => t.id === requestedView)) {
+    const id = requestedView;
+    requestedView = null;
+    setView(id);
+  }
+
   async function setView(id: string) {
     if (!visibleTabs.some((t) => t.id === id)) return;
     activeView = id as ViewId;
+    if ($page.url.searchParams.get('view') !== id) {
+      const url = new URL($page.url);
+      if (id === 'console') url.searchParams.delete('view');
+      else url.searchParams.set('view', id);
+      goto(url, { replaceState: true, noScroll: true, keepFocus: true });
+    }
     if (org && !connection) {
       try {
         connection = await getConnectionInfo(org.id, instanceId);
@@ -55,6 +74,8 @@
     icon: typeof Terminal;
     disabled: boolean;
     capability?: CapabilityId;
+    /** Capability states that show the tab; default: available only. */
+    showWhen?: readonly CapabilityState[];
   }
 
   const tabs: ConsoleTab[] = [
@@ -66,10 +87,15 @@
     { id: 'alerts', label: 'Alerts', icon: Bell, disabled: false },
     { id: 'mqtt', label: 'MQTT', icon: Radio, disabled: false },
     { id: 'tokens', label: 'Tokens', icon: Key, disabled: false },
+    // Also shown when licensed but turned off, where it explains the
+    // single-node state instead of disappearing.
+    { id: 'cluster', label: 'Cluster', icon: Network, disabled: false, capability: 'cluster', showWhen: ['available', 'disabled'] },
   ];
 
   let capabilities: CapabilitiesView | null = null;
-  $: visibleTabs = tabs.filter((t) => !t.capability || capabilityUsable(capabilities, t.capability));
+  // Clustering is on (not just licensed): Monitoring then points to the Cluster tab.
+  $: clusterServed = capabilityIn(capabilities, 'cluster', ['available']);
+  $: visibleTabs = tabs.filter((t) => !t.capability || capabilityIn(capabilities, t.capability, t.showWhen ?? ['available']));
 
   onMount(async () => {
     if (!org) return;
@@ -152,7 +178,7 @@
       {#if activeView === 'console'}
         <SQLConsole {client} on:queryExecuted={handleQueryExecuted} />
       {:else if activeView === 'monitoring'}
-        <Monitoring {client} />
+        <Monitoring {client} onOpenCluster={clusterServed ? () => setView('cluster') : null} />
       {:else if activeView === 'logs'}
         <LogExplorer {client} />
       {:else if activeView === 'retention'}
@@ -163,6 +189,14 @@
         <Alerts orgId={org?.id ?? ''} {instanceId} />
       {:else if activeView === 'mqtt'}
         <MqttSubscriptions {client} currentRole={data.currentRole ?? 'viewer'} />
+      {:else if activeView === 'cluster' && org}
+        <!-- Loaded on demand: only admins of clustered instances open it. Keyed so
+             switching instances starts from a clean view. -->
+        {#await import('$lib/components/cluster/ClusterView.svelte') then mod}
+          {#key instanceId}
+            <svelte:component this={mod.default} orgId={org.id} {instanceId} />
+          {/key}
+        {/await}
       {:else if activeView === 'tokens'}
         <TokenManager {client} arcVersion={connection?.arc_version ?? ''} />
       {/if}

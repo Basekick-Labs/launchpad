@@ -3,7 +3,7 @@
 // not a provisioned Kubernetes deployment.
 
 import { env } from '$env/dynamic/private';
-import { isSafeUrl, safeRequest, type SafeResponse } from './ssrf.js';
+import { isSafeUrl, parseCidr, safeRequest, type SafeResponse } from './ssrf.js';
 
 /**
  * Whether operators have opted into pointing instances at private/internal
@@ -13,6 +13,32 @@ import { isSafeUrl, safeRequest, type SafeResponse } from './ssrf.js';
  */
 export function allowPrivateEndpoints(): boolean {
   return env.LAUNCHPAD_ALLOW_PRIVATE_ENDPOINTS === 'true';
+}
+
+let nodeCidrsCache: { raw: string; cidrs: NonNullable<ReturnType<typeof parseCidr>>[] } | null = null;
+
+/**
+ * Operator-set scope for cluster node addresses (#7): comma-separated CIDRs
+ * in LAUNCHPAD_CLUSTER_NODE_CIDRS, e.g. "10.42.0.0/16". Without it, Launchpad
+ * only contacts nodes on the instance endpoint's own /24 (IPv4) or /64 (IPv6).
+ * Invalid entries are logged once and ignored.
+ */
+export function clusterNodeCidrs(): NonNullable<ReturnType<typeof parseCidr>>[] {
+  const raw = env.LAUNCHPAD_CLUSTER_NODE_CIDRS ?? '';
+  if (nodeCidrsCache?.raw === raw) return nodeCidrsCache.cidrs;
+  const cidrs: NonNullable<ReturnType<typeof parseCidr>>[] = [];
+  for (const entry of raw.split(',').map((e) => e.trim()).filter(Boolean)) {
+    const c = parseCidr(entry);
+    if (c) cidrs.push(c);
+    else console.warn('[cluster] ignoring invalid LAUNCHPAD_CLUSTER_NODE_CIDRS entry', { entry });
+  }
+  nodeCidrsCache = { raw, cidrs };
+  return cidrs;
+}
+
+/** Options for the cluster node module, from the environment. */
+export function clusterOptions(): { allowPrivate: boolean; nodeCidrs: NonNullable<ReturnType<typeof parseCidr>>[] } {
+  return { allowPrivate: allowPrivateEndpoints(), nodeCidrs: clusterNodeCidrs() };
 }
 
 /** Error thrown when an endpoint is well-formed but blocked for being private. */
