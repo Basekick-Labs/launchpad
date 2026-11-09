@@ -15,7 +15,6 @@
   import MqttSubscriptions from '$lib/components/MqttSubscriptions.svelte';
   import { LogExplorer } from '$lib/components/logs';
   import StatusBar from '$lib/components/StatusBar.svelte';
-  import ClusterView from '$lib/components/cluster/ClusterView.svelte';
   import { Button } from '$lib/components/ui/button';
   import {
     ArrowLeft, Terminal, Activity, FileText, Database,
@@ -170,7 +169,13 @@
       {:else if activeView === 'mqtt'}
         <MqttSubscriptions {client} currentRole={data.currentRole ?? 'viewer'} />
       {:else if activeView === 'cluster' && org}
-        <ClusterView orgId={org.id} {instanceId} />
+        <!-- Loaded on demand: only admins of clustered instances open it. Keyed so
+             switching instances starts from a clean view. -->
+        {#await import('$lib/components/cluster/ClusterView.svelte') then mod}
+          {#key instanceId}
+            <svelte:component this={mod.default} orgId={org.id} {instanceId} />
+          {/key}
+        {/await}
       {:else if activeView === 'tokens'}
         <TokenManager {client} arcVersion={connection?.arc_version ?? ''} />
       {/if}

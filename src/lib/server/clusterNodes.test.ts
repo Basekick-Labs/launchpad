@@ -9,6 +9,7 @@ import {
   type ClusterTarget,
 } from './clusterNodes';
 import type { ClusterStatus } from '../cluster';
+import { parseCidr } from './ssrf';
 
 /**
  * Three fake Arc nodes on loopback. Each answers as itself on
@@ -28,13 +29,17 @@ let clusterOverride: unknown = null;
 let clusterStatusCode = 200;
 
 const TOKEN = 'admin-token';
-const opts = { allowPrivate: true };
+const opts = { allowPrivate: true, nodeCidrs: [] };
+let seriesStatus = 200;
+let metricsStatus = 200;
+let logsStatus = 200;
+let clusterNameOverride: string | undefined | null = 'test-cluster';
 
 function topology() {
   return {
     enabled: true,
     mode: 'cluster',
-    cluster_name: 'test-cluster',
+    ...(clusterNameOverride === null ? {} : { cluster_name: clusterNameOverride }),
     local_node_id: 'a',
     raft: { enabled: true, leader_id: 'a', state: 'Leader' },
     nodes: ['a', 'b', 'c'].map((id) => ({
@@ -66,9 +71,11 @@ function handler(id: string) {
       case '/health':
         return send(200, { status: 'ok' });
       case '/api/v1/metrics':
-        return send(200, { goroutines: 42, memory_sys_bytes: 1024, uptime_seconds: 60, not_a_metric: 'x' });
-      case '/api/v1/metrics/timeseries/system':
+        return send(metricsStatus, { num_cpu: 4, memory_sys_bytes: 1024, uptime_seconds: 60, not_a_metric: 'x' });
       case '/api/v1/metrics/timeseries/api':
+        if (seriesStatus !== 200) return send(seriesStatus, {});
+      // fallthrough
+      case '/api/v1/metrics/timeseries/system':
       case '/api/v1/metrics/timeseries/application':
         return send(200, {
           data: [
@@ -77,6 +84,7 @@ function handler(id: string) {
           ],
         });
       case '/api/v1/logs':
+        if (logsStatus !== 200) return send(logsStatus, { error: 'Permission denied: admin required' });
         return send(200, { logs: [{ timestamp: '2026-11-09T18:00:00Z', level: 'warn', message: `from ${id}`, component: 'cluster' }] });
       default:
         return send(404, { error: 'Cannot GET' });
@@ -101,12 +109,25 @@ function target(overrides: Partial<ClusterTarget> = {}): ClusterTarget {
 
 const all = () => Object.values(nodes).flatMap((n) => n.requests.map((r) => ({ node: n.id, ...r })));
 
+/** A port nothing listens on: bind, note it, close. */
+async function deadPort(): Promise<number> {
+  const s = http.createServer();
+  await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
+  const port = (s.address() as AddressInfo).port;
+  await new Promise<void>((r) => s.close(() => r()));
+  return port;
+}
+
 beforeEach(() => {
   resetClusterCachesForTests();
   for (const n of Object.values(nodes)) n.requests = [];
   apiAddress = Object.fromEntries(Object.values(nodes).map((n) => [n.id, `127.0.0.1:${n.port}`]));
   clusterOverride = null;
   clusterStatusCode = 200;
+  seriesStatus = 200;
+  metricsStatus = 200;
+  logsStatus = 200;
+  clusterNameOverride = 'test-cluster';
 });
 
 describe('getClusterView', () => {
@@ -124,25 +145,27 @@ describe('getClusterView', () => {
     expect(all().find((r) => r.path === '/api/v1/cluster')?.auth).toBe(`Bearer ${TOKEN}`);
   });
 
-  it('fills a host-less api_address from the coordinator host, as Arc does', async () => {
+  it('fills a host-less or wildcard api_address from the coordinator host, as Arc does', async () => {
     apiAddress.b = `:${nodes.b.port}`;
+    apiAddress.c = `0.0.0.0:${nodes.c.port}`;
     const view = await getClusterView(target(), opts);
     expect(view.reachability.b).toEqual({ reachable: true, error: null });
+    expect(view.reachability.c).toEqual({ reachable: true, error: null });
   });
 
-  it('never contacts a metadata or wildcard address', async () => {
+  it('never contacts metadata addresses, even with private endpoints allowed', async () => {
     apiAddress.b = '169.254.169.254:80';
-    apiAddress.c = '0.0.0.0:80';
     const view = await getClusterView(target(), opts);
     expect(view.reachability.b).toEqual({ reachable: false, error: 'address_blocked' });
-    // ":port"/wildcard host is filled from the coordinator host (loopback here).
-    expect(view.reachability.c.error).not.toBe('address_blocked');
+    expect(view.reachability.a).toEqual({ reachable: true, error: null });
   });
 
-  it('refuses a node outside the endpoint\'s network class', async () => {
-    apiAddress.b = '10.0.0.7:8000'; // endpoint is loopback
-    const view = await getClusterView(target(), opts);
-    expect(view.reachability.b).toEqual({ reachable: false, error: 'address_blocked' });
+  it('keeps nodes to the endpoint\'s /24 unless the operator widens it', async () => {
+    apiAddress.b = `127.0.1.1:${nodes.b.port}`; // loopback, but outside 127.0.0.0/24
+    expect((await getClusterView(target(), opts)).reachability.b).toEqual({ reachable: false, error: 'address_blocked' });
+    resetClusterCachesForTests();
+    const widened = { ...opts, nodeCidrs: [parseCidr('127.0.0.0/8')!] };
+    expect((await getClusterView(target(), widened)).reachability.b.error).not.toBe('address_blocked');
   });
 
   it('reports standalone without probing nodes', async () => {
@@ -157,10 +180,12 @@ describe('getClusterView', () => {
     await expect(getClusterView(target(), opts)).rejects.toMatchObject({ code: 'token_rejected' });
   });
 
-  it('is shared between concurrent callers', async () => {
+  it('is shared between concurrent callers, and keyed by the stored token', async () => {
     const t = target();
     await Promise.all([getClusterView(t, opts), getClusterView(t, opts), getClusterView(t, opts)]);
     expect(all().filter((r) => r.path === '/api/v1/cluster')).toHaveLength(1);
+    await getClusterView({ ...t, admin_token: 'rotated' }, opts);
+    expect(all().filter((r) => r.path === '/api/v1/cluster')).toHaveLength(2);
   });
 });
 
@@ -169,7 +194,7 @@ describe('getNodeSnapshot', () => {
     const snap = await getNodeSnapshot(target(), 'b', 15, opts);
     expect(snap.nodeId).toBe('b');
     expect(snap.source).toBe(`127.0.0.1:${nodes.b.port}`);
-    expect(snap.snapshot).toEqual({ goroutines: 42, memory_sys_bytes: 1024, uptime_seconds: 60 });
+    expect(snap.snapshot).toEqual({ num_cpu: 4, memory_sys_bytes: 1024, uptime_seconds: 60 });
     expect(snap.series.system[1].values).toEqual({ goroutines: 42 });
     expect(snap.spanMinutes).toBe(5);
 
@@ -187,15 +212,33 @@ describe('getNodeSnapshot', () => {
     expect(nodes.c.requests.some((r) => r.path.startsWith('/api/v1/metrics'))).toBe(false);
   });
 
-  it('caches for a few seconds and shares concurrent loads', async () => {
+  it('requires the cluster name: a topology that omits it cannot skip the check', async () => {
+    clusterNameOverride = null;
+    await expect(getNodeSnapshot(target(), 'b', 15, opts)).rejects.toMatchObject({ code: 'identity_mismatch' });
+  });
+
+  it('caches and shares concurrent loads', async () => {
     const t = target();
     await Promise.all([getNodeSnapshot(t, 'c', 15, opts), getNodeSnapshot(t, 'c', 15, opts)]);
     await getNodeSnapshot(t, 'c', 15, opts);
     expect(nodes.c.requests.filter((r) => r.path === '/api/v1/metrics')).toHaveLength(1);
+    expect(nodes.c.requests.filter((r) => r.path === '/api/v1/cluster/local')).toHaveLength(1);
   });
 
-  it('reports a node that is down, and does not retry it on every call', async () => {
-    apiAddress.b = '127.0.0.1:1'; // nothing listens
+  it('leaves a failed series empty instead of failing the snapshot', async () => {
+    seriesStatus = 500;
+    const snap = await getNodeSnapshot(target(), 'b', 15, opts);
+    expect(snap.series.api).toEqual([]);
+    expect(snap.series.system).toHaveLength(2);
+  });
+
+  it('reports a metrics failure as an upstream error', async () => {
+    metricsStatus = 500;
+    await expect(getNodeSnapshot(target(), 'b', 15, opts)).rejects.toMatchObject({ code: 'upstream_status' });
+  });
+
+  it('reports a node that is down, without re-dialling it on the next call', async () => {
+    apiAddress.b = `127.0.0.1:${await deadPort()}`;
     const t = target();
     await expect(getNodeSnapshot(t, 'b', 15, opts)).rejects.toMatchObject({ code: 'unreachable' });
     await expect(getNodeSnapshot(t, 'b', 15, opts)).rejects.toMatchObject({ code: 'unreachable' });
@@ -219,5 +262,10 @@ describe('getNodeLogs', () => {
     const req = nodes.c.requests.find((r) => r.path.startsWith('/api/v1/logs'));
     expect(req?.auth).toBe(`Bearer ${TOKEN}`);
     expect(req?.path).toBe('/api/v1/logs?limit=50&since_minutes=30&level=warn');
+  });
+
+  it('says a read-only token cannot read logs, rather than calling it rejected', async () => {
+    logsStatus = 403;
+    await expect(getNodeLogs(target(), 'c', { limit: 50, level: null, sinceMinutes: 30 }, opts)).rejects.toMatchObject({ code: 'token_not_admin' });
   });
 });

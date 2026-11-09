@@ -31,8 +31,8 @@ export interface ClusterNode {
   /** Coordinator address (host:port), used to fill a host-less api_address. */
   address: string | null;
   apiAddress: string | null;
-  /** ISO time of the last heartbeat the answering node received; null for itself. */
-  lastHeartbeat: string | null;
+  /** Epoch ms of the last heartbeat the answering node received; null for itself. */
+  lastHeartbeat: number | null;
   isActiveCompactor: boolean;
   /** Raft suffrage from raft.membership, when Arc reports it. */
   raftSuffrage: 'voter' | 'nonvoter' | null;
@@ -86,7 +86,7 @@ function parseNode(raw: unknown, suffrage: Map<string, 'voter' | 'nonvoter'>): C
     version: normalizeVersion(n.version),
     address: text(n.address),
     apiAddress: text(n.api_address),
-    lastHeartbeat: hb && !GO_ZERO_TIME.test(hb) && !Number.isNaN(Date.parse(hb)) ? hb : null,
+    lastHeartbeat: hb && !GO_ZERO_TIME.test(hb) && !Number.isNaN(Date.parse(hb)) ? Date.parse(hb) : null,
     isActiveCompactor: n.is_active_compactor === true,
     raftSuffrage: suffrage.get(id) ?? null,
   };
@@ -108,10 +108,15 @@ export function parseClusterStatus(raw: unknown): ClusterStatus | Standalone | n
       if (id && (o?.suffrage === 'voter' || o?.suffrage === 'nonvoter')) suffrage.set(id, o.suffrage);
     }
   }
-  const nodes = Array.isArray(d.nodes)
-    ? d.nodes.slice(0, MAX_NODES).map((n) => parseNode(n, suffrage)).filter((n): n is ClusterNode => n !== null)
-    : [];
-  nodes.sort((a, b) => a.id.localeCompare(b.id));
+  // Keyed by id: a duplicate id would break keyed rendering and lookups.
+  const byId = new Map<string, ClusterNode>();
+  if (Array.isArray(d.nodes)) {
+    for (const raw of d.nodes.slice(0, MAX_NODES)) {
+      const n = parseNode(raw, suffrage);
+      if (n && !byId.has(n.id)) byId.set(n.id, n);
+    }
+  }
+  const nodes = [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
   const compactor = obj(d.active_compactor);
 
   return {
@@ -181,7 +186,7 @@ export const DEFAULT_CHECK_INTERVAL_MS = 5000;
  */
 export function heartbeatAge(node: ClusterNode, serverTimeMs: number | null): number | null {
   if (!node.lastHeartbeat || serverTimeMs === null) return null;
-  return Math.max(0, serverTimeMs - Date.parse(node.lastHeartbeat));
+  return Math.max(0, serverTimeMs - node.lastHeartbeat);
 }
 
 /** Arc counts a peer healthy while its last heartbeat is within 3 intervals. */
@@ -218,14 +223,14 @@ export function parseCheckIntervalMs(raw: unknown): number | null {
 
 /** The /api/v1/metrics keys the node view reads; everything else is dropped. */
 export const SNAPSHOT_KEYS = [
-  'uptime_seconds', 'num_cpu', 'goroutines',
+  'uptime_seconds', 'num_cpu',
   'memory_heap_alloc_bytes', 'memory_sys_bytes',
-  'http_requests_total', 'http_requests_error', 'http_latency_sum_us', 'http_latency_count',
-  'query_requests_total', 'query_errors_total', 'query_latency_sum_us', 'query_latency_count',
+  'http_latency_sum_us', 'http_latency_count',
+  'query_latency_sum_us', 'query_latency_count',
   'query_mgmt_active_queries',
-  'ingest_records_total', 'ingest_bytes_total', 'ingest_errors_total',
+  'ingest_records_total', 'ingest_errors_total',
   'db_connections_open', 'db_connections_in_use', 'db_connections_max',
-  'wal_disk_free_bytes', 'wal_directory_bytes',
+  'wal_disk_free_bytes',
   'compaction_jobs_total', 'compaction_jobs_failed',
 ] as const;
 export type SnapshotKey = (typeof SNAPSHOT_KEYS)[number];
@@ -245,10 +250,14 @@ export function pickSnapshot(raw: unknown): NodeSnapshot {
 
 /** Time-series keys charted per Arc series type (others are dropped server-side). */
 export const SERIES_KEYS = {
-  system: ['memory_heap_mb', 'memory_sys_mb', 'goroutines'],
-  api: ['http_requests_total', 'http_requests_error'],
+  system: ['memory_heap_mb', 'goroutines'],
+  api: ['http_requests_total'],
   application: ['ingest_records_total', 'query_requests_total'],
 } as const;
+
+/** Chart windows offered; Arc keeps what its retention allows (default 30 min). */
+export const SERIES_DURATIONS = [5, 15, 30, 60] as const;
+export type SeriesDuration = (typeof SERIES_DURATIONS)[number];
 export type SeriesType = keyof typeof SERIES_KEYS;
 
 export interface SeriesPoint {
@@ -341,6 +350,10 @@ export function seriesSpanMinutes(points: SeriesPoint[]): number {
 
 export const LOG_LEVELS = ['debug', 'info', 'warn', 'error'] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];
+/** Arc's /api/v1/logs bounds. */
+export const LOG_LIMIT_MAX = 1000;
+export const LOG_SINCE_MAX_MINUTES = 1440;
+export const LOG_SINCE_OPTIONS = [15, 60, 360, 1440] as const;
 
 export interface NodeLogEntry {
   timestamp: string;
@@ -359,7 +372,8 @@ export function pickLogs(raw: unknown, max = 1000): NodeLogEntry[] {
     const o = obj(l);
     const timestamp = text(o?.timestamp, 64);
     const message = typeof o?.message === 'string' ? o.message.slice(0, 8192) : null;
-    if (!timestamp || message === null) continue;
+    // An unparseable timestamp would throw in the date formatter at render.
+    if (!timestamp || Number.isNaN(Date.parse(timestamp)) || message === null) continue;
     out.push({
       timestamp,
       level: (text(o?.level, 16) ?? 'INFO').toUpperCase(),
@@ -372,20 +386,77 @@ export function pickLogs(raw: unknown, max = 1000): NodeLogEntry[] {
 }
 
 // ---------------------------------------------------------------------------
-// UI text
+// API contract between Launchpad's cluster routes and the Cluster view
 
-/** What each server-side failure means for an admin looking at a node. */
+export type ClusterErrorCode =
+  | 'unreachable'
+  | 'standalone'
+  | 'not_found'
+  | 'bad_address'
+  | 'address_blocked'
+  | 'identity_mismatch'
+  | 'tls_error'
+  | 'token_rejected'
+  | 'token_not_admin'
+  | 'upstream_status'
+  | 'internal';
+
+export interface NodeReachability {
+  /** null = not checked in time. */
+  reachable: boolean | null;
+  error: Extract<ClusterErrorCode, 'unreachable' | 'address_blocked' | 'bad_address'> | null;
+}
+
+/** Every payload carries the server clock twice so the browser can age it without trusting its own. */
+interface Served {
+  fetchedAt: number;
+  servedAt: number;
+}
+
+export interface ClusterViewData extends Served {
+  status: ClusterStatus | Standalone;
+  checkIntervalMs: number | null;
+  /** The answering node's clock (Date header) when it produced `status`. */
+  serverTime: number | null;
+  reachability: Record<string, NodeReachability>;
+}
+
+export interface NodeSnapshotData extends Served {
+  nodeId: string;
+  source: string;
+  snapshot: NodeSnapshot;
+  series: Record<SeriesType, SeriesPoint[]>;
+  spanMinutes: number;
+}
+
+export interface NodeLogsData extends Served {
+  nodeId: string;
+  source: string;
+  logs: NodeLogEntry[];
+}
+
+/** How old data is, on the browser's clock, without comparing clocks. */
+export function dataAgeMs(d: Served, receivedAt: number, now: number): number {
+  return Math.max(0, d.servedAt - d.fetchedAt) + Math.max(0, now - receivedAt);
+}
+
+const ERROR_TEXT: Record<ClusterErrorCode | 'forbidden' | 'error', string> = {
+  unreachable: 'Launchpad could not reach it',
+  address_blocked: 'Its address is outside what Launchpad may contact (see LAUNCHPAD_CLUSTER_NODE_CIDRS)',
+  bad_address: 'Arc reports no usable API address for it',
+  identity_mismatch: 'Its address answered as a different node',
+  tls_error: 'TLS failed: check "Cluster node scheme" in the connection settings',
+  token_rejected: 'Arc rejected the stored token',
+  token_not_admin: 'This needs an admin token',
+  standalone: 'Clustering is not enabled on this instance',
+  not_found: 'This node is no longer in the cluster',
+  upstream_status: 'Arc returned an unexpected response',
+  internal: 'Launchpad hit an internal error',
+  forbidden: 'You need to be an owner or admin of this organization',
+  error: 'Something went wrong',
+};
+
+/** What each failure means for an admin looking at a node. */
 export function describeClusterError(code: string | null | undefined): string {
-  switch (code) {
-    case 'unreachable': return 'Launchpad could not reach it';
-    case 'address_blocked': return 'Its address is not allowed from Launchpad';
-    case 'bad_address': return 'Arc reports no usable API address for it';
-    case 'identity_mismatch': return 'Its address answered as a different node';
-    case 'tls_error': return 'TLS failed: check "Cluster node scheme" in the connection settings';
-    case 'token_rejected': return 'Arc rejected the stored token';
-    case 'standalone': return 'Clustering is not enabled on this instance';
-    case 'not_found': return 'This node is no longer in the cluster';
-    case 'upstream_status': return 'Arc returned an unexpected response';
-    default: return 'Something went wrong';
-  }
+  return ERROR_TEXT[(code ?? 'error') as keyof typeof ERROR_TEXT] ?? ERROR_TEXT.error;
 }

@@ -37,17 +37,10 @@ export function formatAge(ms: number | null | undefined): string {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
-/** A per-second rate with a compact suffix: 1530 → "1.5k/s". */
-export function formatRate(perSecond: number | null | undefined): string {
-  if (perSecond == null || !Number.isFinite(perSecond) || perSecond < 0) return DASH;
-  if (perSecond < 10) return `${perSecond.toFixed(1)}/s`;
-  if (perSecond < 1000) return `${Math.round(perSecond)}/s`;
-  if (perSecond < 1_000_000) return `${(perSecond / 1000).toFixed(1)}k/s`;
-  return `${(perSecond / 1_000_000).toFixed(1)}M/s`;
-}
+const COUNT = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
 
-/** Whole numbers with grouping; DASH for missing values. */
+/** Whole numbers with the viewer's grouping; DASH for missing values. */
 export function formatCount(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return DASH;
-  return Math.round(value).toLocaleString('en-US');
+  return COUNT.format(Math.round(value));
 }

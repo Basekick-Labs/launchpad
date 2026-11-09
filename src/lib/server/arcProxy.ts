@@ -43,9 +43,8 @@
 
 import https from 'node:https';
 import http from 'node:http';
-import net from 'node:net';
 import { Readable } from 'node:stream';
-import type { ResolvedTarget } from './ssrf';
+import { sniFor, type ResolvedTarget } from './ssrf';
 
 /**
  * Statuses that must carry no body. `new Response` throws on these unless the
@@ -146,8 +145,7 @@ export function streamUpstream(opts: StreamUpstreamOptions): Promise<UpstreamRes
     const req = mod.request(
       {
         host: ip,
-        // Node refuses an IP literal as SNI servername; only names get one.
-        servername: isHttps && net.isIP(resolved.hostname) === 0 ? resolved.hostname : undefined,
+        servername: isHttps ? sniFor(resolved.hostname) : undefined,
         port: resolved.port,
         path: `/${path}`,
         method,

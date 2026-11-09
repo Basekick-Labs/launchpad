@@ -154,8 +154,8 @@ describe('clusterSummary', () => {
 
 describe('node metrics', () => {
   it('keeps only known finite metrics', () => {
-    expect(pickSnapshot({ goroutines: 50, num_cpu: 14, secret_field: 'x', http_requests_total: NaN, memory_sys_bytes: -1 }))
-      .toEqual({ goroutines: 50, num_cpu: 14 });
+    expect(pickSnapshot({ goroutines: 50, num_cpu: 14, secret_field: 'x', uptime_seconds: NaN, memory_sys_bytes: -1 }))
+      .toEqual({ num_cpu: 14 });
   });
 
   it('treats an unsampled WAL disk (0) as not reported', () => {
@@ -186,7 +186,7 @@ describe('node metrics', () => {
   it('down-selects series keys and drops bad points', () => {
     const pts = pickSeries(series, 'api');
     expect(pts).toHaveLength(4);
-    expect(pts[0].values).toEqual({ http_requests_total: 100, http_requests_error: 1 });
+    expect(pts[0].values).toEqual({ http_requests_total: 100 });
     expect(seriesSpanMinutes(pts)).toBe(0);
   });
 
@@ -194,7 +194,7 @@ describe('node metrics', () => {
     const [xs, ys] = rateSeries(pickSeries(series, 'api'), 'http_requests_total');
     expect(ys).toEqual([10, 4]);
     expect(xs).toHaveLength(2);
-    expect(gaugeSeries(pickSeries(series, 'api'), 'http_requests_error')[1]).toEqual([1, 1, 0, 0]);
+    expect(gaugeSeries(pickSeries(series, 'api'), 'http_requests_total')[1]).toEqual([100, 150, 10, 30]);
   });
 });
 
@@ -204,7 +204,8 @@ describe('pickLogs', () => {
       logs: [
         { timestamp: '2026-11-09T18:13:33Z', level: 'warn', component: 'cluster', message: 'fewer than three writers', caller: 'health.go:416', extra: 'x' },
         { level: 'INFO' },
-        { timestamp: 't', message: 'm'.repeat(10_000) },
+        { timestamp: 'not a time', message: 'would throw in the date formatter' },
+        { timestamp: '2026-11-09T18:13:34Z', message: 'm'.repeat(10_000) },
       ],
     });
     expect(logs[0]).toEqual({ timestamp: '2026-11-09T18:13:33Z', level: 'WARN', component: 'cluster', message: 'fewer than three writers', caller: 'health.go:416' });

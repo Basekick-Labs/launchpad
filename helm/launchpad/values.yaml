@@ -33,6 +33,12 @@ baseUrl: "http://localhost:3000"
 # the proxy resolves-and-pins the target IP per request (DNS-rebinding safe).
 allowPrivateEndpoints: false
 
+# Networks Launchpad may contact for per-node metrics and logs of Arc
+# clusters (LAUNCHPAD_CLUSTER_NODE_CIDRS). Empty: only nodes on the instance
+# endpoint's own /24 (IPv4) or /64 (IPv6). On k3s, nodes advertise pod IPs:
+# clusterNodeCidrs: ["10.42.0.0/16"]
+clusterNodeCidrs: []
+
 # Extra environment variables (e.g. Mailgun, Turnstile, OAuth). See .env.example.
 # extraEnv:
 #   - name: MAILGUN_API_KEY

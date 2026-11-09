@@ -1,5 +1,5 @@
 import type { CapabilitiesView } from '$lib/capabilities';
-import type { ClusterStatus, NodeLogEntry, NodeSnapshot, SeriesPoint, SeriesType, Standalone } from '$lib/cluster';
+import type { ClusterViewData, NodeLogsData, NodeSnapshotData } from '$lib/cluster';
 
 export interface User {
   id: string;
@@ -310,45 +310,24 @@ export class ClusterApiError extends Error {
   }
 }
 
-async function clusterFetch<T>(path: string): Promise<T> {
-  const res = await apiFetch(path);
+async function clusterFetch<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(path, { signal });
   if (res.ok) return res.json();
   const body = (await res.json().catch(() => null)) as { error?: string; message?: string } | null;
-  throw new ClusterApiError(body?.error ?? 'error', body?.message ?? `Request failed (${res.status})`);
-}
-
-export interface ClusterViewResponse {
-  status: ClusterStatus | Standalone;
-  checkIntervalMs: number | null;
-  serverTime: number | null;
-  reachability: Record<string, { reachable: boolean; error: string | null }>;
-  fetchedAt: number;
-}
-
-export interface NodeSnapshotResponse {
-  nodeId: string;
-  source: string;
-  fetchedAt: number;
-  snapshot: NodeSnapshot;
-  series: Record<SeriesType, SeriesPoint[]>;
-  spanMinutes: number;
-}
-
-export interface NodeLogsResponse {
-  nodeId: string;
-  source: string;
-  fetchedAt: number;
-  logs: NodeLogEntry[];
+  // Cluster routes answer {error: code, message}; the shared auth preamble
+  // answers {error: 'Forbidden'} and friends, so fall back to the status.
+  const code = body?.message ? body.error ?? 'error' : res.status === 401 || res.status === 403 ? 'forbidden' : res.status === 404 ? 'not_found' : 'error';
+  throw new ClusterApiError(code, body?.message ?? body?.error ?? `Request failed (${res.status})`);
 }
 
 const clusterBase = (orgId: string, id: string) => `/api/v1/orgs/${orgId}/instances/${id}/cluster`;
 
-export function getClusterView(orgId: string, id: string): Promise<ClusterViewResponse> {
-  return clusterFetch(clusterBase(orgId, id));
+export function getClusterView(orgId: string, id: string, signal?: AbortSignal): Promise<ClusterViewData> {
+  return clusterFetch(clusterBase(orgId, id), signal);
 }
 
-export function getNodeSnapshot(orgId: string, id: string, nodeId: string, duration: number): Promise<NodeSnapshotResponse> {
-  return clusterFetch(`${clusterBase(orgId, id)}/nodes/${encodeURIComponent(nodeId)}/snapshot?duration=${duration}`);
+export function getNodeSnapshot(orgId: string, id: string, nodeId: string, duration: number, signal?: AbortSignal): Promise<NodeSnapshotData> {
+  return clusterFetch(`${clusterBase(orgId, id)}/nodes/${encodeURIComponent(nodeId)}/snapshot?duration=${duration}`, signal);
 }
 
 export function getNodeLogs(
@@ -356,8 +335,9 @@ export function getNodeLogs(
   id: string,
   nodeId: string,
   q: { limit: number; level: string | null; since: number },
-): Promise<NodeLogsResponse> {
+  signal?: AbortSignal,
+): Promise<NodeLogsData> {
   const params = new URLSearchParams({ limit: String(q.limit), since: String(q.since) });
   if (q.level) params.set('level', q.level);
-  return clusterFetch(`${clusterBase(orgId, id)}/nodes/${encodeURIComponent(nodeId)}/logs?${params}`);
+  return clusterFetch(`${clusterBase(orgId, id)}/nodes/${encodeURIComponent(nodeId)}/logs?${params}`, signal);
 }

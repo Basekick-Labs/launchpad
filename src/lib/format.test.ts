@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatAge, formatBytes, formatCount, formatRate, formatUptime } from './format';
+import { formatAge, formatBytes, formatCount, formatUptime } from './format';
 
 describe('formatBytes', () => {
   it('picks binary units', () => {
@@ -30,16 +30,9 @@ describe('formatAge', () => {
   });
 });
 
-describe('formatRate', () => {
-  it('scales with a suffix', () => {
-    expect([0, 2.25, 512.4, 1530, 2_500_000].map(formatRate)).toEqual(['0.0/s', '2.3/s', '512/s', '1.5k/s', '2.5M/s']);
-    expect(formatRate(-1)).toBe('—');
-  });
-});
-
 describe('formatCount', () => {
   it('groups digits', () => {
-    expect(formatCount(1234567)).toBe('1,234,567');
+    expect(formatCount(1234567)).toBe(new Intl.NumberFormat().format(1234567));
     expect(formatCount(undefined)).toBe('—');
   });
 });

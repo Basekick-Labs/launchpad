@@ -1,13 +1,18 @@
 <script lang="ts">
-  import { ClusterApiError, getNodeSnapshot, type NodeSnapshotResponse } from '$lib/cloudApi';
+  import { onDestroy } from 'svelte';
+  import { ClusterApiError, getNodeSnapshot } from '$lib/cloudApi';
   import {
+    dataAgeMs,
     describeClusterError,
     gaugeSeries,
     rateSeries,
+    SERIES_DURATIONS,
     walDiskFree,
     windowLatencyMs,
     type ClusterNode,
+    type NodeReachability,
     type NodeSnapshot,
+    type NodeSnapshotData,
   } from '$lib/cluster';
   import { formatAge, formatBytes, formatCount, formatUptime } from '$lib/format';
   import MetricChart from '$lib/components/MetricChart.svelte';
@@ -18,67 +23,71 @@
   export let node: ClusterNode;
   /** Bumped by the parent on each refresh. */
   export let tick: number;
-  export let reachability: { reachable: boolean; error: string | null } | null;
+  /** The parent's 1 s clock. */
+  export let now: number;
+  export let reachability: NodeReachability | null;
 
-  const DURATIONS = [5, 15, 30, 60];
-  let duration = 15;
-  let data: NodeSnapshotResponse | null = null;
+  let duration: number = 15;
+  let data: NodeSnapshotData | null = null;
+  let receivedAt = 0;
   /** The snapshot before `data`, for latency over the refresh window. */
   let previous: NodeSnapshot | null = null;
   let error: ClusterApiError | null = null;
   let loading = false;
-  let request = 0;
+  let controller: AbortController | null = null;
 
   async function load() {
-    const mine = ++request;
+    controller?.abort();
+    const mine = (controller = new AbortController());
     loading = true;
     try {
-      const next = await getNodeSnapshot(orgId, instanceId, node.id, duration);
-      if (mine !== request) return;
-      // The server caches for 5 s; an identical fetch is not a new window.
+      const next = await getNodeSnapshot(orgId, instanceId, node.id, duration, mine.signal);
+      // The server caches the snapshot; the same one again is not a new window.
       if (!data || next.fetchedAt !== data.fetchedAt) previous = data?.snapshot ?? null;
       data = next;
+      receivedAt = Date.now();
       error = null;
     } catch (err) {
-      if (mine !== request) return;
+      if (mine.signal.aborted) return;
       error = err instanceof ClusterApiError ? err : new ClusterApiError('error', 'Could not load the node');
     } finally {
-      if (mine === request) loading = false;
+      if (controller === mine) loading = false;
     }
   }
 
-  // Refetch on every parent refresh and when the duration changes.
+  onDestroy(() => controller?.abort());
+
+  // Refetch on every parent refresh and when the window changes.
   $: tick, duration, load();
 
   $: s = data?.snapshot ?? {};
   $: httpLatency = data ? windowLatencyMs(previous, s, 'http_latency_sum_us', 'http_latency_count') : null;
   $: queryLatency = data ? windowLatencyMs(previous, s, 'query_latency_sum_us', 'query_latency_count') : null;
   $: walFree = walDiskFree(s);
-  $: sys = data?.series.system ?? [];
-  $: api = data?.series.api ?? [];
-  $: app = data?.series.application ?? [];
+  $: heap = gaugeSeries(data?.series.system ?? [], 'memory_heap_mb');
+  $: goroutines = gaugeSeries(data?.series.system ?? [], 'goroutines');
+  $: httpRate = rateSeries(data?.series.api ?? [], 'http_requests_total');
+  $: ingestRate = rateSeries(data?.series.application ?? [], 'ingest_records_total');
+  $: queryRate = rateSeries(data?.series.application ?? [], 'query_requests_total');
 
   function ms(v: number | null): string {
     return v === null ? '—' : `${v.toFixed(v < 10 ? 2 : 0)} ms`;
   }
 </script>
 
-<section class="rounded-lg border bg-card p-4" aria-label="Node {node.id}">
+<section class="rounded-lg border bg-card p-4" aria-labelledby="node-detail-{node.id}">
   <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
     <div>
-      <h3 class="font-semibold">Node <span class="font-mono">{node.name}</span></h3>
+      <h3 id="node-detail-{node.id}" class="font-semibold">Node <span class="font-mono">{node.name}</span></h3>
       <p class="text-xs text-muted-foreground">
-        {#if data}
-          Source: node <span class="font-mono">{data.nodeId}</span> at <span class="font-mono">{data.source}</span> · fetched {formatAge(Date.now() - data.fetchedAt)}
-        {:else}
-          Source: node <span class="font-mono">{node.id}</span>
-        {/if}
+        Source: node <span class="font-mono">{data?.nodeId ?? node.id}</span>
+        {#if data}at <span class="font-mono">{data.source}</span> · fetched {formatAge(dataAgeMs(data, receivedAt, now))}{/if}
       </p>
     </div>
     <label class="flex items-center gap-2 text-xs text-muted-foreground">
       Charts
-      <select bind:value={duration} class="h-8 rounded-md border border-input bg-background px-2 text-xs">
-        {#each DURATIONS as d}<option value={d}>Last {d} min</option>{/each}
+      <select bind:value={duration} class="h-8 rounded-md border border-input bg-background px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        {#each SERIES_DURATIONS as d}<option value={d}>Last {d} min</option>{/each}
       </select>
     </label>
   </div>
@@ -91,7 +100,7 @@
       {/if}
       {#if data}Showing the last data read.{/if}
     </div>
-  {:else if reachability && !reachability.reachable && !data}
+  {:else if reachability && reachability.reachable === false && !data}
     <div role="status" class="mb-3 rounded-md border p-3 text-sm text-muted-foreground">{describeClusterError(reachability.error)}.</div>
   {/if}
 
@@ -128,23 +137,20 @@
         <div class="text-xs text-muted-foreground">WAL disk free</div>
         <div class="mt-1 font-semibold">{walFree === null ? 'Not reported' : formatBytes(walFree)}</div>
       </div>
-      <div class="rounded-md border p-3">
-        <div class="text-xs text-muted-foreground">CPU % · disk usage</div>
-        <div class="mt-1 text-sm text-muted-foreground">Not reported by Arc</div>
-      </div>
     </div>
 
     <div class="grid grid-cols-1 gap-3 lg:grid-cols-2">
-      <MetricChart title="Heap memory" unit="MB" data={gaugeSeries(sys, 'memory_heap_mb')} />
-      <MetricChart title="Goroutines" data={gaugeSeries(sys, 'goroutines')} color="#3B82F6" />
-      <MetricChart title="HTTP requests/s" data={rateSeries(api, 'http_requests_total')} color="#10B981" />
-      <MetricChart title="Ingested records/s" data={rateSeries(app, 'ingest_records_total')} color="#F59E0B" />
-      <MetricChart title="Queries/s" data={rateSeries(app, 'query_requests_total')} color="#EF4444" />
+      <MetricChart title="Heap memory" unit="MB" data={heap} />
+      <MetricChart title="Goroutines" data={goroutines} color="#3B82F6" />
+      <MetricChart title="HTTP requests/s" data={httpRate} color="#10B981" />
+      <MetricChart title="Ingested records/s" data={ingestRate} color="#F59E0B" />
+      <MetricChart title="Queries/s" data={queryRate} color="#EF4444" />
     </div>
     <p class="mt-2 text-xs text-muted-foreground">
-      Arc keeps these in memory{data.spanMinutes ? `; this node currently holds about ${data.spanMinutes} min` : ''}. Launchpad's own requests count toward the node's HTTP totals.
+      Arc keeps these in memory{data.spanMinutes ? `; this node currently holds about ${data.spanMinutes} min` : ''}.
+      Arc does not report CPU % or disk usage. Launchpad's own requests count toward the node's HTTP totals.
     </p>
   {/if}
 
-  <NodeLogs {orgId} {instanceId} nodeId={node.id} {tick} />
+  <NodeLogs {orgId} {instanceId} nodeId={node.id} {tick} {now} />
 </section>

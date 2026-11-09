@@ -15,7 +15,7 @@ export interface Instance {
   /** Version the instance reported, when Arc exposes it (cluster mode). */
   detected_arc_version: string | null;
   /** 'http' | 'https' for cluster node API addresses; null = the endpoint's scheme. */
-  node_scheme: string | null;
+  node_scheme: 'http' | 'https' | null;
   admin_token: string | null;
   created_at: string;
   updated_at: string;
@@ -128,7 +128,8 @@ export async function updateInstanceConnection(
     WHERE id = ?
   `).run(name, endpointUrl, adminToken, status, nodeScheme, endpointUrl, id);
 
-  logEvent(id, 'updated', { endpoint_url: endpointUrl, status });
+  // node_scheme decides whether the token crosses the network in cleartext.
+  logEvent(id, 'updated', { endpoint_url: endpointUrl, status, node_scheme: nodeScheme });
   return getInstance(id);
 }
 

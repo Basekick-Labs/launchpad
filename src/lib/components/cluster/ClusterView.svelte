@@ -1,13 +1,15 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { ClusterApiError, getClusterView, type ClusterViewResponse } from '$lib/cloudApi';
+  import { ClusterApiError, getClusterView } from '$lib/cloudApi';
   import {
     clusterSummary,
+    dataAgeMs,
     describeClusterError,
     heartbeatAge,
     heartbeatStale,
     type ClusterNode,
-    type ClusterStatus,
+    type ClusterViewData,
+    type NodeState,
   } from '$lib/cluster';
   import { formatAge } from '$lib/format';
   import { Badge } from '$lib/components/ui/badge';
@@ -20,28 +22,33 @@
 
   const REFRESH_MS = 15_000;
 
-  let view: ClusterViewResponse | null = null;
+  let view: ClusterViewData | null = null;
+  /** Browser time the current view arrived; ages are counted from here. */
+  let receivedAt = 0;
   let error: ClusterApiError | null = null;
   let loading = false;
   let autoRefresh = true;
-  let lastSuccess: number | null = null;
   let now = Date.now();
   let selectedId: string | null = null;
+  let leftNotice: string | null = null;
   /** Bumped after every successful refresh so the node panels refetch with it. */
   let tick = 0;
+  let controller: AbortController | null = null;
   let refreshTimer: ReturnType<typeof setInterval> | undefined;
   let clockTimer: ReturnType<typeof setInterval> | undefined;
 
   async function refresh() {
     if (loading) return;
     loading = true;
+    controller = new AbortController();
     try {
-      view = await getClusterView(orgId, instanceId);
+      view = await getClusterView(orgId, instanceId, controller.signal);
+      receivedAt = Date.now();
       error = null;
-      lastSuccess = Date.now();
       tick += 1;
     } catch (err) {
-      // Keep the last good view on screen and say it is stale.
+      if (controller?.signal.aborted) return;
+      // Keep the last good view on screen and say the refresh failed.
       error = err instanceof ClusterApiError ? err : new ClusterApiError('error', 'Could not load the cluster');
     } finally {
       loading = false;
@@ -51,38 +58,56 @@
   function setAuto(on: boolean) {
     autoRefresh = on;
     clearInterval(refreshTimer);
-    if (on) refreshTimer = setInterval(refresh, REFRESH_MS);
+    if (on) refreshTimer = setInterval(() => document.visibilityState === 'visible' && refresh(), REFRESH_MS);
+  }
+
+  // A hidden tab stops polling; coming back refreshes at once.
+  function onVisibility() {
+    if (document.visibilityState === 'visible' && autoRefresh) refresh();
   }
 
   onMount(() => {
     refresh();
     setAuto(true);
     clockTimer = setInterval(() => (now = Date.now()), 1000);
+    document.addEventListener('visibilitychange', onVisibility);
   });
 
   onDestroy(() => {
     clearInterval(refreshTimer);
     clearInterval(clockTimer);
+    controller?.abort();
+    if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility);
   });
 
-  $: status = view?.status.enabled ? (view.status as ClusterStatus) : null;
-  $: standaloneReason = view && !view.status.enabled ? view.status.reason : null;
+  $: status = view?.status.enabled ? view.status : null;
+  $: standalone = view && !view.status.enabled ? view.status : null;
   $: summary = status ? clusterSummary(status) : null;
-  $: if (status && (!selectedId || !status.nodes.some((n) => n.id === selectedId))) {
-    selectedId = status.localNodeId ?? status.nodes[0]?.id ?? null;
+  $: if (status) {
+    if (selectedId && !status.nodes.some((n) => n.id === selectedId)) {
+      leftNotice = `Node ${selectedId} is no longer in the cluster.`;
+      selectedId = null;
+    }
+    if (!selectedId) selectedId = status.localNodeId ?? status.nodes[0]?.id ?? null;
   }
   $: selected = status?.nodes.find((n) => n.id === selectedId) ?? null;
-  $: stale = lastSuccess !== null && now - lastSuccess > 2 * REFRESH_MS;
+  $: ageOfView = view ? dataAgeMs(view, receivedAt, now) : 0;
+  $: stale = autoRefresh && view !== null && ageOfView > 2 * REFRESH_MS;
 
-  // Heartbeat ages are measured on Arc's clock (the response Date header);
-  // advance them with Launchpad's clock between refreshes.
-  function age(node: ClusterNode): number | null {
-    if (!view?.serverTime) return null;
-    const a = heartbeatAge(node, view.serverTime);
-    return a === null ? null : a + (now - view.fetchedAt);
+  function select(id: string) {
+    selectedId = id;
+    leftNotice = null;
   }
 
-  const STATE_VARIANT: Record<string, 'success' | 'destructive' | 'secondary' | 'outline'> = {
+  // Heartbeat age on Arc's clock (Date header) plus how long the view has
+  // existed since: no browser/server clock comparison anywhere.
+  function age(node: ClusterNode, sinceView: number): number | null {
+    if (!view?.serverTime) return null;
+    const a = heartbeatAge(node, view.serverTime);
+    return a === null ? null : a + sinceView;
+  }
+
+  const STATE_VARIANT: Record<NodeState, 'success' | 'destructive' | 'secondary' | 'outline'> = {
     healthy: 'success',
     unhealthy: 'destructive',
     dead: 'destructive',
@@ -98,14 +123,15 @@
       <h2 class="text-lg font-semibold">Cluster</h2>
       {#if status}
         <p class="text-xs text-muted-foreground">
-          {status.clusterName ?? 'Unnamed cluster'} · as seen by <span class="font-mono">{status.localNodeId ?? 'the endpoint'}</span>
+          {status.clusterName ?? 'Unnamed cluster'} · as seen by
+          {#if status.localNodeId}<span class="font-mono">{status.localNodeId}</span>{:else}the endpoint{/if}
         </p>
       {/if}
     </div>
     <div class="flex items-center gap-2">
-      {#if lastSuccess}
+      {#if view}
         <span class="text-xs {stale ? 'text-yellow-600 dark:text-yellow-400' : 'text-muted-foreground'}">
-          {stale ? 'Stale · ' : ''}updated {formatAge(now - lastSuccess)}
+          {stale ? 'Stale · ' : ''}updated {formatAge(ageOfView)}
         </span>
       {/if}
       <Button variant="ghost" size="sm" on:click={() => setAuto(!autoRefresh)} aria-label={autoRefresh ? 'Pause auto-refresh' : 'Resume auto-refresh'}>
@@ -123,17 +149,17 @@
     </div>
   {/if}
 
-  {#if !view && loading}
-    <div class="flex flex-1 items-center justify-center text-sm text-muted-foreground">Loading cluster…</div>
-  {:else if !view && error}
+  {#if !view && error}
     <div class="flex flex-1 flex-col items-center justify-center gap-3 text-center">
       <p class="text-sm text-destructive">Could not load the cluster: {describeClusterError(error.code)}.</p>
       <Button size="sm" variant="outline" on:click={refresh}>Try again</Button>
     </div>
-  {:else if standaloneReason !== null || (view && !view.status.enabled)}
+  {:else if !view}
+    <div class="flex flex-1 items-center justify-center text-sm text-muted-foreground">Loading cluster…</div>
+  {:else if standalone}
     <div class="rounded-lg border bg-card p-6 text-sm">
       <p class="font-medium">This instance runs as a single node.</p>
-      <p class="mt-1 text-muted-foreground">{standaloneReason ?? 'Clustering is not enabled.'}</p>
+      <p class="mt-1 text-muted-foreground">{standalone.reason ?? 'Clustering is not enabled.'}</p>
       <p class="mt-3 text-muted-foreground">Its resource metrics and application logs are on the <strong>Monitoring</strong> tab.</p>
     </div>
   {:else if status && summary}
@@ -179,18 +205,18 @@
           </thead>
           <tbody class="divide-y">
             {#each status.nodes as node (node.id)}
-              {@const hb = age(node)}
-              {@const reach = view?.reachability[node.id]}
-              <tr
-                class="cursor-pointer hover:bg-accent/50 {node.id === selectedId ? 'bg-accent' : ''}"
-                on:click={() => (selectedId = node.id)}
-                on:keydown={(e) => (e.key === 'Enter' || e.key === ' ') && (selectedId = node.id)}
-                tabindex="0"
-                aria-selected={node.id === selectedId}
-              >
+              {@const hb = age(node, ageOfView)}
+              {@const hbStale = heartbeatStale(hb, view.checkIntervalMs)}
+              {@const reach = view.reachability[node.id]}
+              <tr class={node.id === selectedId ? 'bg-accent' : ''}>
                 <td class="px-3 py-2">
                   <div class="flex flex-wrap items-center gap-1.5">
-                    <span class="font-mono">{node.name}</span>
+                    <button
+                      type="button"
+                      class="font-mono underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      aria-pressed={node.id === selectedId}
+                      on:click={() => select(node.id)}
+                    >{node.name}</button>
                     {#if node.id === status.leaderId}<Badge variant="outline">leader</Badge>{/if}
                     {#if node.id === status.primaryWriterId || node.writerState === 'primary'}<Badge variant="outline">primary</Badge>{/if}
                     {#if node.isActiveCompactor || node.id === status.activeCompactorId}<Badge variant="outline">compactor</Badge>{/if}
@@ -202,12 +228,12 @@
                 </td>
                 <td class="px-3 py-2"><Badge variant={STATE_VARIANT[node.state]}>{node.state}</Badge></td>
                 <td class="px-3 py-2 font-mono text-xs">{node.version ?? '—'}</td>
-                <td class="px-3 py-2 text-xs {heartbeatStale(hb, view?.checkIntervalMs ?? null) ? 'font-medium text-destructive' : 'text-muted-foreground'}">
-                  {node.id === status.localNodeId ? 'answering node' : formatAge(hb)}
+                <td class="px-3 py-2 text-xs {hbStale ? 'font-medium text-destructive' : 'text-muted-foreground'}">
+                  {node.id === status.localNodeId ? 'answering node' : formatAge(hb)}{hbStale ? ' (stale)' : ''}
                 </td>
                 <td class="px-3 py-2 text-xs">
-                  {#if !reach}
-                    <span class="text-muted-foreground">—</span>
+                  {#if !reach || reach.reachable === null}
+                    <span class="text-muted-foreground">Not checked</span>
                   {:else if reach.reachable}
                     <span class="text-green-600 dark:text-green-400">Reachable</span>
                   {:else}
@@ -220,9 +246,28 @@
         </table>
       </div>
 
+      {#if leftNotice}
+        <p role="status" class="mb-2 text-sm text-yellow-700 dark:text-yellow-400">{leftNotice}</p>
+      {/if}
+
+      <div class="mb-3 flex flex-wrap gap-1.5" role="group" aria-label="Choose a node">
+        {#each status.nodes as node (node.id)}
+          <button
+            type="button"
+            aria-pressed={node.id === selectedId}
+            on:click={() => select(node.id)}
+            class="flex items-center gap-1.5 rounded-md border px-2.5 py-1 font-mono text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring
+              {node.id === selectedId ? 'border-primary bg-primary text-primary-foreground' : 'hover:bg-accent'}"
+          >
+            <span class="h-1.5 w-1.5 rounded-full {node.state === 'healthy' ? 'bg-green-500' : node.state === 'unknown' ? 'bg-muted-foreground' : 'bg-red-500'}" aria-hidden="true" />
+            {node.name}
+          </button>
+        {/each}
+      </div>
+
       {#if selected}
         {#key selected.id}
-          <NodeDetail {orgId} {instanceId} node={selected} {tick} reachability={view?.reachability[selected.id] ?? null} />
+          <NodeDetail {orgId} {instanceId} node={selected} {tick} {now} reachability={view.reachability[selected.id] ?? null} />
         {/key}
       {/if}
     {/if}

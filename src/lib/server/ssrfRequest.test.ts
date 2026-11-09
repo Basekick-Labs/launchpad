@@ -74,6 +74,24 @@ describe('safeRequest https to an IP literal', () => {
   it('fails on the TLS handshake, not on an invalid SNI option', async () => {
     // The server speaks plain HTTP, so the handshake fails; before the fix the
     // request never got that far (Node rejects an IP as servername).
-    await expect(safeRequest(base.replace('http:', 'https:') + '/small', opts)).rejects.toMatchObject({ code: 'EPROTO' });
+    // The exact TLS error code depends on the OpenSSL build; what matters is
+    // that it is not Node's invalid-option error.
+    const err = await safeRequest(base.replace('http:', 'https:') + '/small', opts).catch((e) => e);
+    expect(err?.code).toBeDefined();
+    expect(err.code).not.toBe('ERR_INVALID_ARG_VALUE');
+  });
+});
+
+describe('safeRequest pinTo', () => {
+  it('connects to the pinned IP without resolving the host', async () => {
+    const url = base.replace('127.0.0.1', 'pinned.invalid') + '/small';
+    const res = await safeRequest(url, { ...opts, pinTo: '127.0.0.1' });
+    expect(res.body.toString()).toBe('tiny');
+  });
+
+  it('applies the policy to the pinned IP', async () => {
+    await expect(safeRequest(`${base}/small`, { ...opts, pinTo: '169.254.169.254' })).rejects.toThrow(/forbidden/);
+    await expect(safeRequest(`${base}/small`, { allowHttp: true, allowPrivate: false, pinTo: '127.0.0.1' })).rejects.toThrow(/private/);
+    await expect(safeRequest(`${base}/small`, { ...opts, pinTo: 'localhost' })).rejects.toThrow(/IP address/);
   });
 });
