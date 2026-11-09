@@ -1,8 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { continuousQueryEditFields } from '$lib/arcClient';
   import type { ArcClient, ContinuousQuery, CQExecution, CQExecuteResult, CreateContinuousQuery } from '$lib/arcClient';
-  import { continuousQueryDefinition } from '$lib/arcClient';
+  import { continuousQueryDefinition, continuousQueryEditFields } from '$lib/arcClient';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
   import { Label } from '$lib/components/ui/label';
@@ -353,8 +352,9 @@ ORDER BY 1`;
 
   async function toggleQueryActive(query: ContinuousQuery) {
     try {
-      // Keep sending the definition for compatibility with older Arc versions
-      // that require it; newer versions also accept partial update bodies.
+      // Send the stored definition with is_active flipped. Arc through 26.09.x
+      // refuses a body carrying only is_active (arc#993, arc#1011); 27.01.1
+      // accepts it (arc#1023), but the full body works on both.
       await client.updateContinuousQuery(query.id, {
         ...continuousQueryDefinition(query),
         is_active: !query.is_active

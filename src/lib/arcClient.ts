@@ -239,10 +239,15 @@ export function continuousQueryEditFields(
 
 /**
  * The definition fields to send when updating a stored continuous query.
- * Older Arc versions require the complete definition on PUT, so callers
- * changing one field send everything else as it stands. Optional values that
- * are already unset are omitted; current Arc versions preserve those values,
- * while older replacement-style versions clear them.
+ *
+ * Arc through 26.09.x replaces the whole definition on PUT: it requires name,
+ * database, both measurements, query and interval, and overwrites the optional
+ * fields with whatever the body carries (arc#993, arc#1011). Arc 27.01.1 makes
+ * PUT a partial update (arc#1023): an absent key keeps its stored value and an
+ * explicit null clears it. Sending the complete definition works on both, so a
+ * caller changing one field sends everything else as it stands. Optional
+ * values that are already unset are omitted, which leaves them unset either
+ * way.
  */
 export function continuousQueryDefinition(query: ContinuousQuery): CreateContinuousQuery {
   return {
@@ -786,9 +791,11 @@ export class ArcClient {
   }
 
   /**
-   * Send the full definition for compatibility with older Arc versions that
-   * require it. Newer versions apply fields present in the body and preserve
-   * fields left out; nullable optional values can be sent to clear them.
+   * Arc through 26.09.x replaces the whole definition on PUT and refuses a
+   * body missing the required fields (arc#993, arc#1011); 27.01.1 applies only
+   * the keys present and clears an optional field sent as null (arc#1023). The
+   * required fields stay required here so the body is valid on both, and a
+   * cleared optional field must be sent as null to be cleared on 27.01.1.
    */
   async updateContinuousQuery(id: number, cq: UpdateContinuousQuery): Promise<ContinuousQuery> {
     const response = await fetch(`${this.baseURL}/api/v1/continuous_queries/${id}`, {

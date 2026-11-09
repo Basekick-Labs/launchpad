@@ -36,8 +36,10 @@ describe('retentionPolicyEditFields (Arc #93)', () => {
 });
 
 /**
- * Older Arc versions require key definition fields on PUT. The toggle helper
- * sends the stored definition for compatibility with those versions.
+ * Arc through 26.09.x replaces the whole definition on PUT, so a partial body
+ * is refused (arc#993, arc#1011 made six fields required) or blanks the
+ * columns it leaves out. 27.01.1 accepts partial bodies (arc#1023), but the
+ * toggle still sends the stored definition so it works on both.
  */
 describe('continuousQueryDefinition', () => {
 	const stored: ContinuousQuery = {
