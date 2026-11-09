@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
-  import { getConnectionInfo, type ConnectionInfo } from '$lib/cloudApi';
+  import { getConnectionInfo, getInstanceCapabilities, type ConnectionInfo } from '$lib/cloudApi';
+  import { capabilityUsable, type CapabilitiesView, type CapabilityId } from '$lib/capabilities';
   import { ArcClient, type QueryResult } from '$lib/arcClient';
   import SQLConsole from '$lib/components/SQLConsole.svelte';
   import SchemaExplorer from '$lib/components/SchemaExplorer.svelte';
@@ -44,7 +45,17 @@
   let statusColumnCount: number | null = null;
   let statusExecutionTime: number | null = null;
 
-  const tabs = [
+  // A tab with `capability` appears only when the instance serves it (#6).
+  // Enterprise views (#7–#14) add an entry here and one in CAPABILITIES.
+  interface ConsoleTab {
+    id: ViewId;
+    label: string;
+    icon: typeof Terminal;
+    disabled: boolean;
+    capability?: CapabilityId;
+  }
+
+  const tabs: ConsoleTab[] = [
     { id: 'console', label: 'SQL Console', icon: Terminal, disabled: false },
     { id: 'logs', label: 'Log Viewer', icon: FileText, disabled: false },
     { id: 'monitoring', label: 'Monitoring', icon: Activity, disabled: false },
@@ -55,8 +66,17 @@
     { id: 'tokens', label: 'Tokens', icon: Key, disabled: false },
   ];
 
+  let capabilities: CapabilitiesView | null = null;
+  $: visibleTabs = tabs.filter((t) => !t.capability || capabilityUsable(capabilities, t.capability));
+
   onMount(async () => {
     if (!org) return;
+    // Only probe when some tab depends on it; never block the console on it.
+    if (tabs.some((t) => t.capability)) {
+      getInstanceCapabilities(org.id, instanceId)
+        .then((view) => { capabilities = view; })
+        .catch(() => { /* capability tabs stay hidden */ });
+    }
     try {
       connection = await getConnectionInfo(org!.id, instanceId);
       // Use server-side proxy — it auto-injects admin auth, no client-side token needed
@@ -100,7 +120,7 @@
 
     <!-- Tabs -->
     <div class="flex items-center gap-1">
-      {#each tabs as tab}
+      {#each visibleTabs as tab}
         <button
           class="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors
             {tab.disabled ? 'text-muted-foreground/40 cursor-not-allowed' : activeView === tab.id ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:text-foreground'}"

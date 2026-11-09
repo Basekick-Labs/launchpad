@@ -254,6 +254,12 @@ export interface SafeRequestOptions extends SafeUrlOptions {
   timeoutMs?: number;
   /** Abort (and treat as failure) once the response exceeds this many bytes. */
   maxResponseBytes?: number;
+  /**
+   * Resolve with at most this many body bytes, then close the connection.
+   * For probes that need the status and a little of the body: a large healthy
+   * response is a success here, where maxResponseBytes would make it a failure.
+   */
+  truncateResponseAt?: number;
 }
 
 export interface SafeResponse {
@@ -294,7 +300,19 @@ export async function safeRequest(
         (res) => {
           const chunks: Buffer[] = [];
           let total = 0;
+          const done = () =>
+            resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) });
           res.on('data', (chunk: Buffer) => {
+            if (opts.truncateResponseAt !== undefined) {
+              const room = opts.truncateResponseAt - total;
+              if (chunk.length >= room) {
+                chunks.push(chunk.subarray(0, room));
+                total += room;
+                done(); // settle first: the destroy below emits 'error'
+                req.destroy();
+                return;
+              }
+            }
             total += chunk.length;
             if (opts.maxResponseBytes && total > opts.maxResponseBytes) {
               req.destroy(new Error('Response too large'));
@@ -302,9 +320,7 @@ export async function safeRequest(
             }
             chunks.push(chunk);
           });
-          res.on('end', () =>
-            resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) }),
-          );
+          res.on('end', done);
         },
       );
       req.setTimeout(timeoutMs, () => req.destroy(new Error('Request timed out')));

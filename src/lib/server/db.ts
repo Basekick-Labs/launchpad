@@ -237,6 +237,9 @@ function runMigrations(db: Database.Database) {
   // column the running code SELECTs must be ensured here too, or the query
   // throws "no such column" on older installs.
   ensureColumn(db, 'users', 'mfa_last_timestep', 'INTEGER');
+  // Version reported by the instance itself (#6). arc_version held the latest
+  // GitHub release at connect time, not the instance's, and is no longer read.
+  ensureColumn(db, 'instances', 'detected_arc_version', 'TEXT');
 }
 
 /** Idempotently add a column if the table doesn't already have it. */
