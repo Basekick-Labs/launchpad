@@ -1,3 +1,4 @@
+import { readBoundedJsonBody } from '$lib/server/util';
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
@@ -9,7 +10,7 @@ export const POST: RequestHandler = async ({ locals, request, cookies }) => {
     return json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const { org_id } = await request.json();
+  const { org_id } = await readBoundedJsonBody(request);
   if (!org_id) {
     return json({ error: 'org_id is required' }, { status: 400 });
   }

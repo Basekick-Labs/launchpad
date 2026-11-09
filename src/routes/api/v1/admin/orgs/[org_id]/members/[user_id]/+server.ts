@@ -1,3 +1,4 @@
+import { readBoundedJsonBody } from '$lib/server/util';
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
@@ -16,7 +17,7 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
     return json({ error: 'Member not found' }, { status: 404 });
   }
 
-  const { role } = await request.json();
+  const { role } = await readBoundedJsonBody(request);
   if (!role || !['owner', 'admin', 'member', 'viewer'].includes(role)) {
     return json({ error: 'Invalid role' }, { status: 400 });
   }

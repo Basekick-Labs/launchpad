@@ -1,3 +1,5 @@
+import { readBoundedBody } from '$lib/server/util';
+import { MAX_PROXY_BODY_BYTES } from '$lib/server/bodyLimits';
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import type http from 'node:http';
@@ -127,9 +129,11 @@ async function proxyRequest(request: Request, params: { org_id: string; id: stri
 
   // Read the body as raw bytes so binary payloads (msgpack/parquet) aren't
   // corrupted by a UTF-8 round-trip.
-  const body = request.method !== 'GET' && request.method !== 'HEAD'
-    ? Buffer.from(await request.arrayBuffer())
+  const bytes = request.method !== 'GET' && request.method !== 'HEAD'
+    ? await readBoundedBody(request, MAX_PROXY_BODY_BYTES)
     : null;
+  // Share the bounded reader's allocation rather than copying it again.
+  const body = bytes ? Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
 
   const hostHeader = new URL(instance.endpoint_url).host;
   // Changes are recorded once, with the Launchpad user, when Arc's status is

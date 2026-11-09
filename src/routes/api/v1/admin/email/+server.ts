@@ -1,3 +1,4 @@
+import { readBoundedJsonBody } from '$lib/server/util';
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getEmailConfig, setEmailConfig, type EmailConfig } from '$lib/server/settings';
@@ -63,7 +64,7 @@ export const PUT: RequestHandler = async ({ locals, request }) => {
   const denied = requireAdmin(locals);
   if (denied) return denied;
 
-  const cfg = coerce(await request.json());
+  const cfg = coerce(await readBoundedJsonBody(request));
 
   // If updating an existing provider without re-sending the secret, keep the old one.
   if (cfg.provider === 'mailgun' && !cfg.apiKey) {
@@ -84,7 +85,7 @@ export const POST: RequestHandler = async ({ locals, request }) => {
   const denied = requireAdmin(locals);
   if (denied) return denied;
 
-  const body = await request.json();
+  const body = await readBoundedJsonBody(request);
   const to = String(body?.to || '').trim();
   if (!to) return json({ error: 'Recipient address required' }, { status: 400 });
 

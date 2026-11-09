@@ -1,3 +1,4 @@
+import { readBoundedJsonBody } from '$lib/server/util';
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { hasAnyUser, type EmailConfig } from '$lib/server/settings';
@@ -10,7 +11,7 @@ export const POST: RequestHandler = async ({ request }) => {
     return json({ error: 'Setup already completed.' }, { status: 403 });
   }
 
-  const body = await request.json();
+  const body = await readBoundedJsonBody(request);
   const to = String(body?.to || '').trim();
   if (!to) return json({ error: 'Enter an address to send the test to.' }, { status: 400 });
 

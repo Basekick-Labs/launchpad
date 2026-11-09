@@ -1,3 +1,4 @@
+import { readBoundedJsonBody } from '$lib/server/util';
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
@@ -13,7 +14,7 @@ export const POST: RequestHandler = async ({ request, cookies, getClientAddress 
     return json({ error: 'Too many login attempts. Please try again later.' }, { status: 429 });
   }
 
-  const { email: rawEmail, password } = await request.json();
+  const { email: rawEmail, password } = await readBoundedJsonBody(request);
 
   if (!rawEmail || !password) {
     return json({ error: 'Email and password are required' }, { status: 400 });

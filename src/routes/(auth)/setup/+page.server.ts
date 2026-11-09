@@ -1,3 +1,4 @@
+import { readBoundedFormData } from '$lib/server/util';
 import { redirect, fail } from '@sveltejs/kit';
 import { v4 as uuidv4 } from 'uuid';
 import type { PageServerLoad, Actions } from './$types';
@@ -53,7 +54,7 @@ export const actions: Actions = {
   complete: async ({ request, cookies }) => {
     if (hasAnyUser()) throw redirect(302, '/login');
 
-    const form = await request.formData();
+    const form = await readBoundedFormData(request);
     const email = String(form.get('email') || '').trim().toLowerCase();
     const password = String(form.get('password') || '');
     const firstName = String(form.get('first_name') || '').trim() || null;

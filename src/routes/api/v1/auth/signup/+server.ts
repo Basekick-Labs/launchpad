@@ -1,3 +1,4 @@
+import { readBoundedJsonBody } from '$lib/server/util';
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { v4 as uuidv4 } from 'uuid';
@@ -52,7 +53,7 @@ export const POST: RequestHandler = async ({ request, cookies, getClientAddress 
     return json({ error: 'Too many signup attempts. Please try again later.' }, { status: 429 });
   }
 
-  const { email: rawEmail, password, name, first_name, last_name, captchaToken } = await request.json();
+  const { email: rawEmail, password, name, first_name, last_name, captchaToken } = await readBoundedJsonBody(request);
 
   if (!rawEmail || !password) {
     return json({ error: 'Email and password are required' }, { status: 400 });
