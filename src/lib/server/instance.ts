@@ -10,7 +10,10 @@ export interface Instance {
   name: string | null;
   endpoint_url: string | null;
   status: string;
-  arc_version: string;
+  /** Legacy: the latest GitHub release when the connection was made. Unused. */
+  arc_version: string | null;
+  /** Version the instance reported, when Arc exposes it (cluster mode). */
+  detected_arc_version: string | null;
   admin_token: string | null;
   created_at: string;
   updated_at: string;
@@ -24,33 +27,6 @@ export interface CreateInstanceInput {
   name?: string;
   endpointUrl: string;
   adminToken?: string;
-}
-
-const DEFAULT_ARC_VERSION = '26.03.1';
-const VERSION_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-let cachedVersion: { version: string; fetchedAt: number } | null = null;
-
-/** Fetch the latest Arc release version from GitHub. Caches for 5 minutes. */
-export async function getLatestArcVersion(): Promise<string> {
-  if (cachedVersion && Date.now() - cachedVersion.fetchedAt < VERSION_CACHE_TTL) {
-    return cachedVersion.version;
-  }
-  try {
-    const res = await fetch('https://api.github.com/repos/Basekick-Labs/arc/releases/latest', {
-      headers: { Accept: 'application/vnd.github.v3+json', 'User-Agent': 'launchpad' },
-    });
-    if (!res.ok) {
-      console.warn(`[arc-version] GitHub API returned ${res.status}, using fallback ${DEFAULT_ARC_VERSION}`);
-      return cachedVersion?.version ?? DEFAULT_ARC_VERSION;
-    }
-    const data = await res.json() as { tag_name: string };
-    const version = data.tag_name.replace(/^v/, '');
-    cachedVersion = { version, fetchedAt: Date.now() };
-    return version;
-  } catch (err: any) {
-    console.warn(`[arc-version] Failed to fetch latest release: ${err.message}, using fallback`);
-    return cachedVersion?.version ?? DEFAULT_ARC_VERSION;
-  }
 }
 
 /**
@@ -72,12 +48,11 @@ export async function createInstance(input: CreateInstanceInput): Promise<Instan
 
   // Probe the server so we land in a real state instead of a fake 'provisioning'.
   const status = await checkArcHealth(endpointUrl, adminToken);
-  const arcVersion = await getLatestArcVersion();
 
   db.prepare(`
-    INSERT INTO instances (id, org_id, resource_id, name, endpoint_url, status, arc_version, admin_token)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, input.orgId, resourceId, name, endpointUrl, status, arcVersion, adminToken);
+    INSERT INTO instances (id, org_id, resource_id, name, endpoint_url, status, admin_token)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, input.orgId, resourceId, name, endpointUrl, status, adminToken);
 
   logEvent(id, 'connected', { endpoint_url: endpointUrl, status });
 
@@ -95,7 +70,7 @@ export function getInstanceByResourceId(resourceId: string): Instance | null {
 }
 
 /** Instance shape without the secret admin_token — safe to send to clients. */
-export type SafeInstance = Omit<Instance, 'admin_token'>;
+export type SafeInstance = Omit<Instance, 'admin_token' | 'arc_version'>;
 
 /**
  * List an org's instances WITHOUT admin_token. This feeds page loads and API
@@ -106,7 +81,7 @@ export type SafeInstance = Omit<Instance, 'admin_token'>;
 export function listInstances(orgId: string): SafeInstance[] {
   const db = getDb();
   return db.prepare(
-    `SELECT id, org_id, resource_id, name, endpoint_url, status, arc_version,
+    `SELECT id, org_id, resource_id, name, endpoint_url, status, detected_arc_version,
             created_at, updated_at, suspended_at, deleted_at
      FROM instances WHERE org_id = ? AND deleted_at IS NULL ORDER BY created_at DESC`
   ).all(orgId) as SafeInstance[];
@@ -143,10 +118,12 @@ export async function updateInstanceConnection(
 
   const status = await checkArcHealth(endpointUrl, adminToken);
 
+  // A different endpoint is a different server: forget the version it reported.
   db.prepare(`
-    UPDATE instances SET name = ?, endpoint_url = ?, admin_token = ?, status = ?, updated_at = datetime('now')
+    UPDATE instances SET name = ?, endpoint_url = ?, admin_token = ?, status = ?, updated_at = datetime('now'),
+      detected_arc_version = CASE WHEN endpoint_url = ? THEN detected_arc_version ELSE NULL END
     WHERE id = ?
-  `).run(name, endpointUrl, adminToken, status, id);
+  `).run(name, endpointUrl, adminToken, status, endpointUrl, id);
 
   logEvent(id, 'updated', { endpoint_url: endpointUrl, status });
   return getInstance(id);

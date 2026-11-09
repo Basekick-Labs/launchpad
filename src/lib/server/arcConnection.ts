@@ -101,6 +101,9 @@ export async function checkArcHealth(endpointUrl: string | null | undefined, adm
       allowPrivate: allowPrivateEndpoints(),
       headers,
       timeoutMs: 5000,
+      // timeoutMs is idle-only; cap the whole check so a server that drips
+      // bytes cannot stall the sequential background health job.
+      signal: AbortSignal.timeout(10_000),
       maxResponseBytes: 64 * 1024,
     });
     return res.status >= 200 && res.status < 300 ? 'running' : 'unreachable';

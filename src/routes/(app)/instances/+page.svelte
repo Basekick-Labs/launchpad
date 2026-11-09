@@ -86,7 +86,7 @@
                 <span class="font-mono text-sm">{instance.endpoint_url ?? '—'}</span>
               </td>
               <td class="px-4 py-3 text-sm text-muted-foreground">
-                {instance.arc_version ? `v${instance.arc_version}` : '—'}
+                {instance.detected_arc_version ? `v${instance.detected_arc_version}` : '—'}
               </td>
               <td class="px-4 py-3 text-sm text-muted-foreground">
                 {formatDateTime(instance.created_at, $timezone)}

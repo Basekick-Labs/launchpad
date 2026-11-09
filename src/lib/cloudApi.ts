@@ -1,3 +1,5 @@
+import type { CapabilitiesView } from '$lib/capabilities';
+
 export interface User {
   id: string;
   email: string;
@@ -19,7 +21,8 @@ export interface Instance {
   name: string | null;
   endpoint_url: string | null;
   status: string;
-  arc_version: string;
+  /** Version the instance reported; null when Arc does not expose it. */
+  detected_arc_version: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -28,7 +31,8 @@ export interface ConnectionInfo {
   url: string | null;
   resource_id: string;
   status: string;
-  arc_version: string;
+  /** Version the instance reported; null when Arc does not expose it. */
+  arc_version: string | null;
 }
 
 async function apiFetch(path: string, options: RequestInit = {}): Promise<Response> {
@@ -165,6 +169,17 @@ export async function updateInstance(
   }
   const data = await res.json();
   return data.instance;
+}
+
+export async function getInstanceCapabilities(
+  orgId: string,
+  id: string,
+  opts: { refresh?: boolean } = {},
+): Promise<CapabilitiesView> {
+  const qs = opts.refresh ? '?refresh=1' : '';
+  const res = await apiFetch(`/api/v1/orgs/${orgId}/instances/${id}/capabilities${qs}`);
+  if (!res.ok) throw new Error('Failed to check instance capabilities');
+  return res.json();
 }
 
 export async function getConnectionInfo(orgId: string, id: string): Promise<ConnectionInfo> {

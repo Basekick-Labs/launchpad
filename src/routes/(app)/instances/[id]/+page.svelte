@@ -3,12 +3,14 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import {
-    getInstance, updateInstance, deleteInstance, type Instance
+    getInstance, updateInstance, deleteInstance, getInstanceCapabilities, type Instance
   } from '$lib/cloudApi';
+  import { describeCapability, tierLabel, type CapabilitiesView, type CapabilityState } from '$lib/capabilities';
+  import { roleAtLeast } from '$lib/roles';
   import { Button } from '$lib/components/ui/button';
   import { toast } from 'svelte-sonner';
   import {
-    ArrowLeft, Trash2, Terminal, Copy, ExternalLink, Pencil
+    ArrowLeft, Trash2, Terminal, Copy, ExternalLink, Pencil, RefreshCw
   } from 'lucide-svelte';
   import { timezone, formatDateTime } from '$lib/stores/timezone';
 
@@ -17,8 +19,51 @@
   $: org = data.activeOrg as { id: string; name: string } | undefined;
   $: instanceId = $page.params.id!;
   const canManageInstances = data.currentRole !== 'viewer';
+  // License and Enterprise feature state is shown to owners and admins.
+  $: isOrgAdmin = roleAtLeast(data.currentRole ?? '', 'admin');
+
+  let capabilities: CapabilitiesView | null = null;
+  let capabilitiesLoading = false;
+  let capabilitiesRequest = 0;
+
+  // Fetched after the page renders and never awaited by it: discovery probes
+  // Arc and can take seconds when the instance is slow. Only the latest
+  // request may write, so a slow response for the pre-edit connection cannot
+  // overwrite the current one.
+  async function loadCapabilities(refresh = false) {
+    if (!org || !isOrgAdmin) return;
+    const request = ++capabilitiesRequest;
+    capabilitiesLoading = true;
+    try {
+      const view = await getInstanceCapabilities(org.id, instanceId, { refresh });
+      if (request === capabilitiesRequest) capabilities = view;
+    } catch {
+      // Keep what is shown; a failed background check is not worth a toast.
+      if (refresh && request === capabilitiesRequest) toast.error('Could not check Enterprise features');
+    } finally {
+      if (request === capabilitiesRequest) capabilitiesLoading = false;
+    }
+  }
+
+  const STATE_DOT: Record<CapabilityState, string> = {
+    available: 'bg-green-500',
+    disabled: 'bg-muted-foreground',
+    unavailable: 'bg-muted-foreground',
+    unlicensed: 'bg-muted-foreground/40',
+    unknown: 'bg-yellow-500',
+  };
+
+  const NOTICE_STYLE = {
+    info: 'border-blue-200 bg-blue-50 text-blue-900 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-100',
+    warning: 'border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-800 dark:bg-yellow-950 dark:text-yellow-100',
+    critical: 'border-red-200 bg-red-50 text-red-900 dark:border-red-800 dark:bg-red-950 dark:text-red-100',
+  } as const;
+
+  $: tier = tierLabel(capabilities?.tier ?? null);
 
   let instance: Instance | null = null;
+  // A fresh discovery beats the stored value, which lags an upgrade.
+  $: version = (capabilities?.reachable ? capabilities.version : null) ?? instance?.detected_arc_version ?? null;
   let events: any[] = [];
   let loading = true;
   let actionLoading = false;
@@ -55,6 +100,7 @@
       editing = false;
       toast.success(updated.status === 'running' ? 'Connection updated — Arc reachable' : 'Connection updated — Arc is unreachable');
       await loadData();
+      loadCapabilities();
     } catch (err: any) {
       toast.error(err.message);
     } finally {
@@ -64,6 +110,7 @@
 
   onMount(() => {
     loadData();
+    loadCapabilities();
   });
 
   async function loadData() {
@@ -120,8 +167,11 @@
             <div class="h-2 w-2 rounded-full {instance.status === 'running' ? 'bg-green-500' : 'bg-red-500'}" />
             <span class="text-sm capitalize">{instance.status === 'running' ? 'Running' : 'Unreachable'}</span>
           </div>
-          {#if instance.arc_version}
-            <span class="text-xs text-muted-foreground">v{instance.arc_version}</span>
+          {#if version}
+            <span class="text-xs text-muted-foreground">v{version}</span>
+          {/if}
+          {#if tier}
+            <span class="rounded-full border px-2 py-0.5 text-xs font-medium">{tier}</span>
           {/if}
         </div>
       </div>
@@ -152,6 +202,10 @@
         <p class="text-xs text-red-700 dark:text-red-300">The Arc server at the configured endpoint did not respond to a health check. Verify the endpoint URL and admin token.</p>
       </div>
     {/if}
+
+    {#each capabilities?.notices ?? [] as notice (notice.message)}
+      <div role="status" class="mb-6 rounded-lg border p-4 text-sm {NOTICE_STYLE[notice.severity]}">{notice.message}</div>
+    {/each}
 
     <!-- Connection Info -->
     <div class="mb-6 rounded-lg border bg-card p-4">
@@ -219,7 +273,7 @@
 
           <div>
             <label class="text-xs text-muted-foreground">Arc Version</label>
-            <p class="mt-1 text-sm font-mono">{instance.arc_version || 'Unknown'}</p>
+            <p class="mt-1 text-sm {version ? 'font-mono' : 'text-muted-foreground'}">{version ?? 'Not reported by this Arc instance'}</p>
           </div>
 
           {#if instance.status === 'running'}
@@ -237,6 +291,37 @@
         </div>
       {/if}
     </div>
+
+    {#if capabilities?.showEnterprise}
+      <!-- Enterprise features: what this instance serves, from Arc itself (#6) -->
+      <div class="mb-6 rounded-lg border bg-card p-4">
+        <div class="mb-3 flex items-center justify-between">
+          <h2 class="font-semibold">Enterprise Features</h2>
+          <Button
+            variant="ghost"
+            size="sm"
+            on:click={() => loadCapabilities(true)}
+            disabled={capabilitiesLoading}
+            title="Check again"
+            aria-label="Check Enterprise features again"
+            aria-busy={capabilitiesLoading}
+          >
+            <RefreshCw class="h-4 w-4 {capabilitiesLoading ? 'animate-spin' : ''}" />
+          </Button>
+        </div>
+        <ul class="divide-y">
+          {#each capabilities.capabilities as cap (cap.id)}
+            <li class="flex items-center justify-between gap-4 py-2">
+              <div class="flex items-center gap-2">
+                <div class="h-2 w-2 rounded-full {STATE_DOT[cap.state]}" aria-hidden="true" />
+                <span class="text-sm">{cap.label}</span>
+              </div>
+              <span class="text-right text-xs text-muted-foreground">{describeCapability(cap)}</span>
+            </li>
+          {/each}
+        </ul>
+      </div>
+    {/if}
 
     <!-- Events -->
     <div class="rounded-lg border bg-card">

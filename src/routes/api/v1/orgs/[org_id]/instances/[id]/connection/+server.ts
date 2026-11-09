@@ -27,6 +27,6 @@ export const GET: RequestHandler = async ({ locals, params }) => {
     url: getInstanceUrl(instance.endpoint_url),
     resource_id: instance.resource_id,
     status: instance.status,
-    arc_version: instance.arc_version,
+    arc_version: instance.detected_arc_version,
   });
 };
