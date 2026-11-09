@@ -5,6 +5,7 @@ import { getDb } from '$lib/server/db';
 import { purgeExpiredInstances, refreshAllInstanceHealth } from '$lib/server/instance';
 import { evaluateAlerts } from '$lib/server/alertEvaluator';
 import { notifyOps, cleanupAlertDedup } from '$lib/server/gchatAlert';
+import { purgeOldChanges } from '$lib/server/instanceChangeLog';
 
 // The public base for server-issued redirects. Behind a reverse proxy (or when
 // the browser has upgraded us to HTTPS via HSTS), `event.url.origin` is derived
@@ -49,6 +50,7 @@ if (!purgeJobStarted) {
   const purgeAndCleanup = async () => {
     purgeExpiredInstances();
     try { cleanupAlertDedup(); } catch (err) { console.error('[purge] cleanupAlertDedup failed:', err); }
+    try { purgeOldChanges(); } catch (err) { console.error('[purge] purgeOldChanges failed:', err); }
   };
   setTimeout(() => {
     runJob('purge', purgeAndCleanup);

@@ -104,6 +104,25 @@ function runMigrations(db: Database.Database) {
       created_at TEXT DEFAULT (datetime('now'))
     );
 
+    -- Changes made to an Arc instance through Launchpad, with the Launchpad
+    -- user who made them. Arc's own audit log only sees the instance's shared
+    -- admin token, so this is where "who changed it" lives. Never request
+    -- bodies: token creation and rotation responses carry secrets.
+    CREATE TABLE IF NOT EXISTS instance_change_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      instance_id TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+      actor_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+      method TEXT NOT NULL,
+      path TEXT NOT NULL,
+      status INTEGER,
+      outcome TEXT NOT NULL,
+      -- A dry run (delete, retention or CQ execute preview): nothing changed.
+      dry_run INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_instance_change_log_instance ON instance_change_log(instance_id, id);
+    CREATE INDEX IF NOT EXISTS idx_instance_change_log_created ON instance_change_log(created_at);
+
     -- Key/value application settings written by the setup wizard / admin
     -- (e.g. email transport config). Values are JSON-encoded strings.
     CREATE TABLE IF NOT EXISTS settings (
@@ -242,6 +261,8 @@ function runMigrations(db: Database.Database) {
   ensureColumn(db, 'instances', 'detected_arc_version', 'TEXT');
   // Scheme for reaching cluster nodes directly (#7); NULL = the endpoint's.
   ensureColumn(db, 'instances', 'node_scheme', 'TEXT');
+  // Added after the table first shipped to dev databases.
+  ensureColumn(db, 'instance_change_log', 'dry_run', 'INTEGER NOT NULL DEFAULT 0');
 }
 
 /** Idempotently add a column if the table doesn't already have it. */
