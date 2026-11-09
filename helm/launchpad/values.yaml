@@ -12,9 +12,10 @@ fullnameOverride: ""
 
 replicaCount: 1
 
-# adapter-node's declared-length limit. JSON endpoints apply a separate 1 MiB
-# streaming cap, including chunked requests without Content-Length.
-requestBodySizeLimit: "268435456"
+# Proxy request streaming cap AND adapter declared-length limit, in bytes.
+# Must be >= 1048576. JSON/setup forms have an independent 1 MiB cap.
+# Raising this increases per-request memory; see README request-body limits.
+requestBodySizeLimit: "8388608"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Required: the secret used to sign session tokens.

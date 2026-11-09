@@ -151,8 +151,9 @@ function isTimestampValue(value: unknown): boolean {
   // ISO 8601 format
   if (/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(str)) return true;
 
-  // Unix timestamp (10 or 13 digits)
-  if (/^\d{10,13}$/.test(str)) return true;
+  // Compare epoch values exactly; converting nanoseconds through Number
+  // would round away precision before checking the plausibility bounds.
+  if (/^\d+$/.test(str) && isPlausibleEpoch(str)) return true;
 
   // Common date formats
   if (/^\d{4}\/\d{2}\/\d{2}/.test(str)) return true;
@@ -168,6 +169,24 @@ function isTimestampValue(value: unknown): boolean {
   }
 
   return false;
+}
+
+function isPlausibleEpoch(value: string): boolean {
+  const significantDigits = value.replace(/^0+/, '');
+  // Even nanoseconds before 2100 fit in 19 digits. Bound BigInt parsing
+  // without using digit count to select a unit, and allow leading zeros.
+  if (significantDigits.length === 0 || significantDigits.length > 19) return false;
+
+  const epoch = BigInt(significantDigits);
+  const startOf2001 = 978307200n;
+  const startOf2100 = 4102444800n;
+
+  // Seconds, milliseconds, microseconds and nanoseconds have disjoint
+  // plausible ranges. Compare the original integer without truncation,
+  // using UTC bounds so detection never depends on the browser's timezone.
+  return [1n, 1_000n, 1_000_000n, 1_000_000_000n].some(
+    scale => epoch >= startOf2001 * scale && epoch < startOf2100 * scale,
+  );
 }
 
 /**

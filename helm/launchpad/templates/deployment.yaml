@@ -40,6 +40,8 @@ spec:
               value: {{ .Values.service.targetPort | quote }}
             - name: NODE_ENV
               value: "production"
+            - name: LAUNCHPAD_PROXY_BODY_SIZE_LIMIT
+              value: {{ .Values.requestBodySizeLimit | quote }}
             - name: BODY_SIZE_LIMIT
               value: {{ .Values.requestBodySizeLimit | quote }}
             - name: LAUNCHPAD_DB_PATH

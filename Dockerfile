@@ -33,9 +33,10 @@ USER node
 ENV PORT=3000
 ENV NODE_ENV=production
 ENV LAUNCHPAD_DB_PATH=/app/data/launchpad.db
-# adapter-node's limit checks declared lengths. JSON routes have a separate
-# 1 MiB streaming cap, including chunked requests.
-ENV BODY_SIZE_LIMIT=268435456
+# Align the adapter's declared-length ceiling and the raw proxy streaming cap.
+# JSON/form routes independently enforce 1 MiB, including chunked requests.
+ENV LAUNCHPAD_PROXY_BODY_SIZE_LIMIT=8388608
+ENV BODY_SIZE_LIMIT=8388608
 
 EXPOSE 3000
 

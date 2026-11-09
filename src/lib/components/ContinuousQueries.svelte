@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { ArcClient, ContinuousQuery, CQExecution, CQExecuteResult, CreateContinuousQuery } from '$lib/arcClient';
-  import { continuousQueryDefinition } from '$lib/arcClient';
+  import { continuousQueryDefinition, continuousQueryEditFields } from '$lib/arcClient';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
   import { Label } from '$lib/components/ui/label';
@@ -291,7 +291,10 @@ ORDER BY 1`;
       }
 
       if (editingQuery) {
-        await client.updateContinuousQuery(editingQuery.id, queryData);
+        await client.updateContinuousQuery(editingQuery.id, {
+          ...queryData,
+          ...continuousQueryEditFields(formDescription, formRetentionDays, formDeleteSourceAfterDays)
+        });
         toast.success('Continuous query updated');
       } else {
         await client.createContinuousQuery(queryData);
@@ -349,10 +352,9 @@ ORDER BY 1`;
 
   async function toggleQueryActive(query: ContinuousQuery) {
     try {
-      // PUT replaces the whole definition, so send the one we already hold
-      // with is_active flipped. A body carrying only is_active is refused
-      // outright, and before Arc required these fields it blanked the columns
-      // it did not carry (arc#993, arc#1011).
+      // Send the stored definition with is_active flipped. Arc through 26.09.x
+      // refuses a body carrying only is_active (arc#993, arc#1011); 27.01.1
+      // accepts it (arc#1023), but the full body works on both.
       await client.updateContinuousQuery(query.id, {
         ...continuousQueryDefinition(query),
         is_active: !query.is_active

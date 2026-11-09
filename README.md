@@ -40,7 +40,8 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | Variable | Purpose |
 |---|---|
 | `LAUNCHPAD_JWT_SECRET` | Secret used to sign session tokens. **The app refuses to start in production without it.** Generate one with `openssl rand -hex 32`. |
-| `BODY_SIZE_LIMIT` | adapter-node's declared-length limit. Docker and Helm set `268435456` (256 MiB); JSON API routes separately enforce a 1 MiB streaming limit. |
+| `LAUNCHPAD_PROXY_BODY_SIZE_LIMIT` | Raw proxy streaming limit in bytes. New default `8388608` (8 MiB); larger proxy payloads require an explicit override. |
+| `BODY_SIZE_LIMIT` | Adapter declared-length limit. Set at least as high as the proxy limit; Docker and Helm align both to `8388608`. JSON/setup forms separately enforce 1 MiB. |
 
 Email (Mailgun), signup CAPTCHA (Cloudflare Turnstile), ops alerting (Google Chat), and Google OAuth are all **optional** — without them, those features are simply skipped (e.g. emails print to the console instead of being sent).
 
@@ -60,7 +61,7 @@ Without it, registering (or health-checking) a private Arc endpoint fails with a
 
 ```bash
 npm run build
-BODY_SIZE_LIMIT=268435456 LAUNCHPAD_JWT_SECRET=$(openssl rand -hex 32) node build
+LAUNCHPAD_PROXY_BODY_SIZE_LIMIT=8388608 BODY_SIZE_LIMIT=8388608 LAUNCHPAD_JWT_SECRET=$(openssl rand -hex 32) node build
 ```
 
 The server listens on `$PORT` (default `3000`).
@@ -111,7 +112,7 @@ Common values (see [`helm/launchpad/values.yaml`](helm/launchpad/values.yaml) fo
 | `jwtSecret` | `""` | **Required** unless `existingSecret` is set. Signs session tokens. |
 | `existingSecret` | `""` | Name of a pre-created Secret holding `LAUNCHPAD_JWT_SECRET` instead. |
 | `baseUrl` | `http://localhost:3000` | Public URL (email links + passkey origin). |
-| `requestBodySizeLimit` | `268435456` | adapter-node's declared-length limit in bytes. JSON API routes enforce a separate 1 MiB limit. |
+| `requestBodySizeLimit` | `8388608` | Proxy streaming and adapter declared-length limit in bytes. JSON API/setup forms enforce a separate 1 MiB limit. |
 | `persistence.size` | `1Gi` | PVC size for the SQLite database. |
 | `ingress.enabled` | `false` | Enable to expose via an Ingress. |
 
@@ -128,3 +129,48 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get
 ## License
 
 [Apache-2.0](LICENSE). Contributions are covered by the [CLA](CLA.md).
+
+## Request-body limits
+
+JSON API writes and first-run setup forms are streamed with a **1 MiB** limit.
+The Arc proxy accepts raw bytes (including msgpack/parquet and empty bodies)
+with a separate **8 MiB** default, including requests without Content-Length.
+Oversized bodies return 413 before forwarding to Arc.
+
+This is a conservative Launchpad deployment limit, **not Arc's ingestion
+limit**. Arc permits SQL up to 1 MiB; JSON escaping can expand that to 6 MiB
+plus its envelope, which fits the proxy default. Arc bulk ingestion/imports
+can be much larger, but buffering those in Launchpad's default 512 MiB pod
+would compete with the control plane. Existing proxy uploads larger than
+8 MiB must use direct Arc access or an explicit operator override.
+
+- Docker: set both `LAUNCHPAD_PROXY_BODY_SIZE_LIMIT` and `BODY_SIZE_LIMIT`
+  to the chosen byte count (for example, `16777216` for 16 MiB).
+- Helm: set `requestBodySizeLimit: "16777216"`; the chart sets both variables.
+- Running the production build directly: explicitly set both variables, e.g.
+  `LAUNCHPAD_PROXY_BODY_SIZE_LIMIT=8388608 BODY_SIZE_LIMIT=8388608 node build`.
+  Without an explicit adapter setting, adapter-node retains its smaller
+  512 KiB declared-length default, which can reject otherwise valid dashboard bodies.
+
+Values must be positive decimal byte counts, the proxy limit must be at least
+1 MiB, and the adapter limit must be at least the proxy limit. Invalid explicit
+settings fail validation; they do not silently disable the limit. The locked
+adapter-node 2.1.2 only checks declared length, so its setting is defense in
+depth, not a replacement for the application streaming readers.
+
+Raising the cap increases memory use for each concurrent request. The proxy
+uses a bounded growing buffer and shares it with the upstream writer, but
+buffer growth, transport buffers and concurrent requests still need headroom.
+This is not a rate/concurrency limit or a guarantee against unlimited parallel
+requests. Size the pod and upstream/proxy concurrency controls before raising
+it; binary byte compatibility does not mean unlimited upload compatibility.
+
+
+The Linux production-adapter regression is reproducible after a build with
+`npm run test:body-limits` and is configured to run in CI on Node 20 and 22. It uses disposable
+SQLite data and a loopback Arc stub, validates exact limits/binary fidelity/
+error responses, and asserts peak RSS during concurrent oversized streams.
+The RSS budget is a regression threshold, not a deployment capacity guarantee.
+
+Default rationale sources: [Arc SQL limits](https://github.com/Basekick-Labs/arc/blob/8d5acf2c630d8777e075072a7f3581135f4ccdd2/internal/config/config.go#L2049-L2078)
+and [Arc request limit](https://github.com/Basekick-Labs/arc/blob/8d5acf2c630d8777e075072a7f3581135f4ccdd2/internal/config/config.go#L2098-L2099).
