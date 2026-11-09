@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
+  import { goto } from '$app/navigation';
   import { getConnectionInfo, getInstanceCapabilities, type ConnectionInfo } from '$lib/cloudApi';
   import { capabilityIn, type CapabilitiesView, type CapabilityId, type CapabilityState } from '$lib/capabilities';
   import { roleAtLeast } from '$lib/roles';
@@ -33,9 +34,27 @@
 
   type ViewId = 'console' | 'monitoring' | 'logs' | 'retention' | 'continuous-queries' | 'alerts' | 'mqtt' | 'tokens' | 'cluster';
   let activeView: ViewId = 'console';
+  /**
+   * The tab named in ?view=, kept in the URL so a reload or a shared link opens
+   * it. Capability tabs only become visible once discovery answers, so the
+   * request waits until the tab exists.
+   */
+  let requestedView: string | null = $page.url.searchParams.get('view');
+  $: if (requestedView && visibleTabs.some((t) => t.id === requestedView)) {
+    const id = requestedView;
+    requestedView = null;
+    setView(id);
+  }
+
   async function setView(id: string) {
     if (!visibleTabs.some((t) => t.id === id)) return;
     activeView = id as ViewId;
+    if ($page.url.searchParams.get('view') !== id) {
+      const url = new URL($page.url);
+      if (id === 'console') url.searchParams.delete('view');
+      else url.searchParams.set('view', id);
+      goto(url, { replaceState: true, noScroll: true, keepFocus: true });
+    }
     if (org && !connection) {
       try {
         connection = await getConnectionInfo(org.id, instanceId);
