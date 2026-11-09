@@ -93,10 +93,14 @@
   ];
 
   let capabilities: CapabilitiesView | null = null;
-  // Arc RBAC is there (licensed or not; unlicensed keeps "remove from team"):
-  // the Tokens tab adds access control and is named for it. Admin-only, like
-  // the capability itself.
-  $: rbacServed = capabilityIn(capabilities, 'rbac', ['available', 'unlicensed']);
+  // Enterprise instances get access control in the Tokens tab (admin-only,
+  // like the capability). RBAC is 'available', or 'unlicensed' on an instance
+  // that has a license configured (lapsed or failed): tokens can still be in
+  // teams there, and removing them is the way out. A plain OSS Arc also
+  // answers RBAC as unlicensed, but has no license at all: Tokens only.
+  $: rbacServed =
+    capabilityIn(capabilities, 'rbac', ['available']) ||
+    (capabilityIn(capabilities, 'rbac', ['unlicensed']) && !!capabilities?.showEnterprise);
 
   // Clustering is on (not just licensed): Monitoring then points to the Cluster tab.
   $: clusterServed = capabilityIn(capabilities, 'cluster', ['available']);
