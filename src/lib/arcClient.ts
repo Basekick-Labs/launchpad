@@ -333,6 +333,15 @@ export interface RotateTokenResponse {
 // never returned — `has_password` reflects whether one is stored.
 export type MqttStatus = 'stopped' | 'running' | 'error' | 'paused';
 
+export interface MqttTopicMappingRule {
+  database?: string;
+  measurement?: string;
+  tags_from_topic?: Array<{ position: number; tag_name: string }>;
+}
+
+export type MqttTopicMappingValue = string | MqttTopicMappingRule;
+export type MqttTopicMapping = Record<string, MqttTopicMappingValue>;
+
 export interface MqttSubscription {
   id: string;
   name: string;
@@ -351,7 +360,7 @@ export interface MqttSubscription {
   auto_start: boolean;
   status: MqttStatus;
   error_message?: string;
-  topic_mapping?: Record<string, string>;
+  topic_mapping?: MqttTopicMapping;
   keep_alive_seconds: number;
   connect_timeout_seconds: number;
   reconnect_min_seconds: number;
@@ -391,7 +400,7 @@ export interface CreateMqttSubscription {
   tls_ca_path?: string;
   tls_insecure_skip_verify?: boolean;
   auto_start?: boolean;
-  topic_mapping?: Record<string, string>;
+  topic_mapping?: MqttTopicMapping;
   keep_alive_seconds?: number;
   connect_timeout_seconds?: number;
   reconnect_min_seconds?: number;
