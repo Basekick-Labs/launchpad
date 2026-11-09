@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createEventDispatcher, tick } from 'svelte';
   import { toast } from 'svelte-sonner';
   import { AccessApiError, applyAccessChange, getAccess } from '$lib/cloudApi';
   import {
@@ -20,12 +21,18 @@
 
   export let orgId: string;
   export let instanceId: string;
+  /** Which part to show: the selected token's access, or teams and roles. */
+  export let section: 'tokens' | 'teams';
   /** The token chosen in the token list beside this panel. */
-  export let selectedTokenId: number | null;
+  export let selectedTokenId: number | null = null;
+  /** Team to bring into view in the teams section. */
+  export let focusTeamId: number | null = null;
   /** Bumped by the parent when tokens change (created, deleted…). */
   export let reloadKey = 0;
+  /** Shared with the parent so both sections and the token list use one load. */
+  export let snapshot: RbacSnapshot | null = null;
 
-  let snapshot: RbacSnapshot | null = null;
+  const dispatch = createEventDispatcher<{ openToken: number; openTeam: number }>();
   let loadError: AccessApiError | null = null;
   let loading = false;
   let now = Date.now();
@@ -56,8 +63,22 @@
       now = Date.now();
     }
   }
-  $: reloadKey, load();
+  // Load on first use and when the parent asks; switching sections reuses it.
+  // A snapshot handed over by the parent (switching sections) counts as loaded.
+  let loadedKey: number | null = snapshot ? reloadKey : null;
+  $: if (loadedKey !== reloadKey || !snapshot) {
+    loadedKey = reloadKey;
+    load();
+  }
   $: selectedTokenId, (addTeamId = '');
+
+  // Bring a team into view when another section links to it.
+  $: if (section === 'teams' && focusTeamId !== null && snapshot) scrollToTeam(focusTeamId);
+  async function scrollToTeam(id: number) {
+    await tick();
+    document.getElementById(`rbac-team-${id}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
+  let addMember: Record<number, string> = {};
 
   function propose(change: RbacChange, from: EditTarget | null = null) {
     editing = null;
@@ -112,6 +133,8 @@
   let mpsByRole = new Map<number, RbacMeasurementPermission[]>();
   let teamById = new Map<number, RbacTeam>();
   let orgName = new Map<number, string>();
+  let tokensByTeam = new Map<number, number[]>();
+  let tokenName = new Map<number, string>();
   $: if (snapshot) {
     const groupBy = <T>(items: T[], key: (t: T) => number) => {
       const m = new Map<number, T[]>();
@@ -123,6 +146,11 @@
     mpsByRole = groupBy(snapshot.measurementPermissions, (m) => m.roleId);
     teamById = new Map(snapshot.teams.map((t) => [t.id, t]));
     orgName = new Map(snapshot.orgs.map((o) => [o.id, o.name]));
+    tokenName = new Map(snapshot.tokens.map((t) => [t.id, t.name]));
+    tokensByTeam = new Map();
+    for (const [tokenId, teamIds] of Object.entries(snapshot.memberships)) {
+      for (const teamId of teamIds) tokensByTeam.set(teamId, [...(tokensByTeam.get(teamId) ?? []), Number(tokenId)]);
+    }
   }
 
   $: selectedToken = snapshot?.tokens.find((t) => t.id === selectedTokenId) ?? null;
@@ -181,6 +209,7 @@
       </p>
     {/if}
 
+    {#if section === 'tokens'}
     <!-- The selected token -->
     <section class="rounded-lg border bg-card p-4" aria-labelledby="rbac-token">
       {#if selectedToken && access}
@@ -194,7 +223,12 @@
           <ul class="mt-1 space-y-1">
             {#each memberOf as teamId (teamId)}
               <li class="flex items-center justify-between text-sm">
-                <span>{teamName(teamId)} <span class="text-xs text-muted-foreground">{orgOfTeam(teamId)}</span></span>
+                <span>
+                  {#if snapshot.licensed}
+                    <button type="button" class="underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" on:click={() => dispatch('openTeam', teamId)}>{teamName(teamId)}</button>
+                  {:else}{teamName(teamId)}{/if}
+                  <span class="text-xs text-muted-foreground">{orgOfTeam(teamId)}</span>
+                </span>
                 <Button size="sm" variant="ghost" aria-label="Remove {selectedToken.name} from {teamName(teamId)}"
                   on:click={() => selectedToken && propose({ kind: 'membership.remove', tokenId: selectedToken.id, teamId })}>Remove</Button>
               </li>
@@ -253,8 +287,9 @@
         <p id="rbac-token" class="text-sm text-muted-foreground">Select a token's name to see its teams and what it can access.</p>
       {/if}
     </section>
+    {/if}
 
-    {#if snapshot.licensed}
+    {#if section === 'teams' && snapshot.licensed}
       <section class="rounded-lg border bg-card p-4" aria-labelledby="rbac-structure">
         <div class="mb-3 flex items-center justify-between">
           <h4 id="rbac-structure" class="font-semibold">Organizations, teams and roles</h4>
@@ -279,7 +314,8 @@
               </div>
               <ul class="mt-2 space-y-3 border-l pl-4">
                 {#each teamsByOrg.get(org.id) ?? [] as team (team.id)}
-                  <li>
+                  {@const members = tokensByTeam.get(team.id) ?? []}
+                  <li id="rbac-team-{team.id}" class="scroll-mt-4 rounded-md {team.id === focusTeamId ? 'bg-accent/40 p-2' : ''}">
                     <div class="flex items-center justify-between gap-2">
                       <div class="flex items-center gap-2">
                         <span class="text-sm font-medium">{team.name}</span>
@@ -292,6 +328,33 @@
                         <Button size="sm" variant="ghost" on:click={() => propose({ kind: 'team.delete', teamId: team.id })} aria-label="Delete {team.name}"><Trash2 class="h-4 w-4 text-destructive" /></Button>
                       </div>
                     </div>
+                    <div class="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
+                      <span class="text-muted-foreground">Tokens:</span>
+                      {#each members as tokenId (tokenId)}
+                        <span class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono">
+                          <button type="button" class="underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" on:click={() => dispatch('openToken', tokenId)}>{tokenName.get(tokenId) ?? `token ${tokenId}`}</button>
+                          <button type="button" class="text-muted-foreground hover:text-destructive" aria-label="Remove {tokenName.get(tokenId) ?? `token ${tokenId}`} from {team.name}"
+                            on:click={() => propose({ kind: 'membership.remove', tokenId, teamId: team.id })}>×</button>
+                        </span>
+                      {:else}
+                        <span class="text-muted-foreground">none</span>
+                      {/each}
+                      {#if !snapshot.truncated}
+                        <select
+                          aria-label="Add a token to {team.name}"
+                          class="h-7 rounded-md border border-input bg-background px-1.5 text-xs"
+                          bind:value={addMember[team.id]}
+                          on:change={() => {
+                            const tokenId = Number(addMember[team.id]);
+                            addMember[team.id] = '';
+                            if (tokenId) propose({ kind: 'membership.add', tokenId, teamId: team.id });
+                          }}
+                        >
+                          <option value="">+ token…</option>
+                          {#each snapshot.tokens.filter((t) => !members.includes(t.id)) as t (t.id)}<option value={String(t.id)}>{t.name}</option>{/each}
+                        </select>
+                      {/if}
+                    </div>
                     <ul class="mt-1 space-y-1 border-l pl-4">
                       {#each rolesByTeam.get(team.id) ?? [] as role (role.id)}
                         {@const mps = mpsByRole.get(role.id) ?? []}
@@ -303,6 +366,9 @@
                                 <span class="text-muted-foreground line-through">{permissionText(role.permissions)}</span>
                                 <span class="sr-only">(replaced by its measurement permissions)</span>
                               {:else}{permissionText(role.permissions)}{/if}
+                              <span class="ml-1 text-xs text-muted-foreground">
+                                · reaches {members.length} token{members.length === 1 ? '' : 's'}{team.enabled ? '' : ' (team disabled)'}
+                              </span>
                             </span>
                             <div class="flex shrink-0 gap-1">
                               <Button size="sm" variant="ghost" aria-label="Limit role {role.databasePattern} of {team.name} to measurements" on:click={() => edit({ kind: 'mp.create', roleId: role.id })}>Limit</Button>

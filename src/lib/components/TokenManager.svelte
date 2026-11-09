@@ -35,6 +35,8 @@
    */
   export let selectable = false;
   export let selectedId: number | null = null;
+  /** Arc RBAC teams per token id, shown on each card (Enterprise). */
+  export let teamsByToken: Record<number, string[]> | null = null;
 
   const dispatch = createEventDispatcher<{ select: TokenInfo; changed: void }>();
 
@@ -444,6 +446,15 @@
               </div>
               {#if token.description}
                 <p class="text-sm text-muted-foreground">{token.description}</p>
+              {/if}
+              {#if teamsByToken}
+                <p class="text-xs text-muted-foreground">
+                  {#if teamsByToken[token.id]?.length}
+                    Teams: {teamsByToken[token.id].join(', ')}
+                  {:else}
+                    In no team: uses its own permissions
+                  {/if}
+                </p>
               {/if}
               <div class="flex flex-wrap gap-1">
                 {#each token.permissions?.filter(p => p !== 'admin') || [] as permission}

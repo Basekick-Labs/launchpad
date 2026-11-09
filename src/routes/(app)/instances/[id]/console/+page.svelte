@@ -106,7 +106,7 @@
   $: clusterServed = capabilityIn(capabilities, 'cluster', ['available']);
   $: visibleTabs = tabs
     .filter((t) => !t.capability || capabilityIn(capabilities, t.capability, t.showWhen ?? ['available']))
-    .map((t) => (t.id === 'tokens' && rbacServed ? { ...t, label: 'Tokens & access' } : t));
+    .map((t) => (t.id === 'tokens' && rbacServed ? { ...t, label: 'Access' } : t));
 
   onMount(async () => {
     if (!org) return;
