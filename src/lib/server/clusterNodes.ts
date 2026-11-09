@@ -486,3 +486,43 @@ export function resetClusterCachesForTests(): void {
   for (const c of [topologyCache, reachCache, identityCache, metricsCache, seriesCache, logsCache, endpointIpCache]) c.clear();
   lastLogged.clear();
 }
+
+// ---------------------------------------------------------------------------
+// Every node, for features Arc does not replicate (query governance, #10)
+
+export interface PinnedNode {
+  nodeId: string;
+  /** Compactors forward queries before Arc's governance runs. */
+  servesQueries: boolean;
+  /** Where to send requests, and the vetted IP to pin them to; null when not reachable. */
+  target: { origin: string; ip: string; display: string } | null;
+  /** Why `target` is null. */
+  error: ClusterErrorCode | null;
+}
+
+/**
+ * The instance's nodes, each resolved with the same address scope and
+ * identity check as the Cluster view. A standalone instance is one node: the
+ * endpoint itself. Never falls back to a load-balanced endpoint for a node
+ * that cannot be reached, so a write can never land on a random node.
+ */
+export async function pinnedNodes(t: ClusterTarget, opts: ClusterOptions): Promise<PinnedNode[]> {
+  const topo = await getTopology(t, opts);
+  if (!topo.status.enabled) {
+    const base = endpointBase(t);
+    const ip = await endpointIp(t, opts);
+    return [{ nodeId: 'standalone', servesQueries: true, target: { origin: base, ip, display: new URL(base).host }, error: null }];
+  }
+  const status = topo.status;
+  const signal = AbortSignal.timeout(NODE_DEADLINE_MS);
+  return Promise.all(status.nodes.map(async (node): Promise<PinnedNode> => {
+    const servesQueries = node.role !== 'compactor';
+    try {
+      const r = await resolveNode(t, node, opts, signal);
+      await verifyIdentity(t, status, r, opts);
+      return { nodeId: node.id, servesQueries, target: { origin: r.origin, ip: r.ip, display: r.display }, error: null };
+    } catch (err) {
+      return { nodeId: node.id, servesQueries, target: null, error: toClusterError(err).code };
+    }
+  }));
+}

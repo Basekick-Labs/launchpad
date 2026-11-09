@@ -2,6 +2,7 @@ import { getDb } from './db.js';
 import { queryArc } from './arcConnection.js';
 import { parseIntervalToMs } from '../alertManager.js';
 import { isSafeWebhookUrl, safePostJson } from './ssrf.js';
+import { queryFailure } from '../governance.js';
 export { isSafeWebhookUrl };
 
 export const MIN_ALERT_INTERVAL_MS = 60_000; // 1 minute minimum
@@ -38,24 +39,23 @@ function evaluateCondition(value: unknown, condition: AlertCondition, threshold:
   }
 }
 
-async function queryInstance(
-  endpointUrl: string | null,
-  adminToken: string,
-  sql: string,
-): Promise<{ rows: unknown[][] } | null> {
-  if (!endpointUrl) return null;
+/** Rows, or why there are none: a failed query must not read as "no results". */
+type QueryOutcome = { rows: unknown[][] } | { error: string };
+
+async function queryInstance(endpointUrl: string | null, adminToken: string, sql: string): Promise<QueryOutcome> {
+  if (!endpointUrl) return { error: 'No endpoint configured' };
   try {
     // safeRequest resolves + pins the IP so this admin-token request can't be
     // redirected to an internal host via DNS rebinding.
     const res = await queryArc(endpointUrl, adminToken, sql);
-    if (res.status < 200 || res.status >= 300) return null;
+    if (res.status < 200 || res.status >= 300) return { error: queryFailure(res.status, res.headers['retry-after']) };
     try {
       return JSON.parse(res.body.toString('utf-8')) as { rows: unknown[][] };
     } catch {
-      return null;
+      return { error: 'Arc returned an unreadable response' };
     }
   } catch {
-    return null;
+    return { error: 'Arc did not respond' };
   }
 }
 
@@ -116,11 +116,17 @@ export async function evaluateAlerts(): Promise<void> {
         continue;
       }
 
-      const result = await queryInstance(rule.endpoint_url, rule.admin_token, rule.query);
+      const outcome = await queryInstance(rule.endpoint_url, rule.admin_token, rule.query);
 
       const checkedAt = new Date().toISOString();
 
-      if (!result?.rows?.length) {
+      if ('error' in outcome) {
+        db.prepare(`UPDATE alert_rules SET last_checked_at = ?, last_value = NULL, last_error = ?, updated_at = datetime('now') WHERE id = ?`)
+          .run(checkedAt, outcome.error, rule.id);
+        continue;
+      }
+      const result = outcome;
+      if (!result.rows?.length) {
         db.prepare(`UPDATE alert_rules SET last_checked_at = ?, last_value = NULL, last_error = 'Query returned no results', updated_at = datetime('now') WHERE id = ?`)
           .run(checkedAt, rule.id);
         continue;

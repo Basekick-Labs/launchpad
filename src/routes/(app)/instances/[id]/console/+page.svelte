@@ -102,11 +102,14 @@
     capabilityIn(capabilities, 'rbac', ['available']) ||
     (capabilityIn(capabilities, 'rbac', ['unlicensed']) && !!capabilities?.showEnterprise);
 
+  // Query governance is on: the Access tab adds Query limits.
+  $: governanceServed = capabilityIn(capabilities, 'query_governance', ['available']);
+
   // Clustering is on (not just licensed): Monitoring then points to the Cluster tab.
   $: clusterServed = capabilityIn(capabilities, 'cluster', ['available']);
   $: visibleTabs = tabs
     .filter((t) => !t.capability || capabilityIn(capabilities, t.capability, t.showWhen ?? ['available']))
-    .map((t) => (t.id === 'tokens' && rbacServed ? { ...t, label: 'Access' } : t));
+    .map((t) => (t.id === 'tokens' && (rbacServed || governanceServed) ? { ...t, label: 'Access' } : t));
 
   onMount(async () => {
     if (!org) return;
@@ -210,7 +213,7 @@
         {/await}
       {:else if activeView === 'tokens' && org}
         {#key instanceId}
-          <TokensView {client} arcVersion={connection?.arc_version ?? ''} orgId={org.id} {instanceId} withAccess={rbacServed} />
+          <TokensView {client} arcVersion={connection?.arc_version ?? ''} orgId={org.id} {instanceId} withAccess={rbacServed} withLimits={governanceServed} />
         {/key}
       {/if}
     {/if}

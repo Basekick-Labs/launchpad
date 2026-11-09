@@ -2,6 +2,7 @@ import type { CapabilitiesView } from '$lib/capabilities';
 import type { ClusterViewData, NodeLogsData, NodeSnapshotData } from '$lib/cluster';
 import type { ChangePage } from '$lib/changeLog';
 import type { RbacChange, RbacSnapshot } from '$lib/rbac';
+import type { GovernanceView, NodeUsage } from '$lib/governance';
 
 export interface User {
   id: string;
@@ -390,4 +391,17 @@ export interface AccessChangeOutcome {
 
 export function applyAccessChange(orgId: string, id: string, change: RbacChange, fingerprint: string): Promise<AccessChangeOutcome> {
   return accessFetch(accessPath(orgId, id), { method: 'POST', body: JSON.stringify({ change, fingerprint }) });
+}
+
+// ---------------------------------------------------------------------------
+// Query governance (#10)
+
+const governancePath = (orgId: string, id: string) => `/api/v1/orgs/${encodeURIComponent(orgId)}/instances/${encodeURIComponent(id)}/governance`;
+
+export function getGovernance(orgId: string, id: string): Promise<GovernanceView> {
+  return clusterFetch(governancePath(orgId, id));
+}
+
+export async function getTokenQueryUsage(orgId: string, id: string, tokenId: number): Promise<NodeUsage[]> {
+  return (await clusterFetch<{ nodes: NodeUsage[] }>(`${governancePath(orgId, id)}/${tokenId}/usage`)).nodes;
 }

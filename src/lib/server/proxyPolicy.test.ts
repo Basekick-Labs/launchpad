@@ -86,3 +86,11 @@ describe('blockedReason', () => {
     expect(blockedReason('api/v1/rb%61c/organizations')).toBeNull();
   });
 });
+
+describe('blockedReason: query governance', () => {
+  it('refuses governance through the proxy, with its own reason', () => {
+    expect(blockedReason('api/v1/governance/policies')).toMatch(/every node/);
+    expect(blockedReason('api/v1/governance/usage/5')).toMatch(/every node/);
+    expect(blockedReason('api/v1/governancex')).toBeNull();
+  });
+});

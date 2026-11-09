@@ -15,10 +15,14 @@
    * on OSS.
    */
   export let withAccess = false;
+  /** Arc query governance is available: adds the Query limits section. */
+  export let withLimits = false;
 
-  type Section = 'tokens' | 'teams';
-  /** Sub-section, kept in the URL (?section=teams) like the console tab. */
-  let section: Section = $page.url.searchParams.get('section') === 'teams' ? 'teams' : 'tokens';
+  type Section = 'tokens' | 'teams' | 'limits';
+  /** Sub-section, kept in the URL (?section=…) like the console tab. */
+  const requested = $page.url.searchParams.get('section');
+  let section: Section = requested === 'teams' || requested === 'limits' ? requested : 'tokens';
+  let limitsTokenId: number | null = null;
   let selectedTokenId: number | null = null;
   let focusTeamId: number | null = null;
   let reloadKey = 0;
@@ -40,6 +44,10 @@
     focusTeamId = id;
     show('teams');
   }
+  function openLimits(tokenId: number) {
+    limitsTokenId = tokenId;
+    show('limits');
+  }
 
   // Team names per token, for the token cards.
   $: teamsByToken = snapshot
@@ -51,13 +59,16 @@
       )
     : null;
 
-  const SECTIONS: Array<{ id: Section; label: string }> = [
-    { id: 'tokens', label: 'Tokens' },
-    { id: 'teams', label: 'Teams & roles' },
+  $: SECTIONS = [
+    { id: 'tokens' as const, label: 'Tokens' },
+    ...(withAccess ? [{ id: 'teams' as const, label: 'Teams & roles' }] : []),
+    ...(withLimits ? [{ id: 'limits' as const, label: 'Query limits' }] : []),
   ];
+  // A section that is not offered (e.g. ?section=limits without governance) falls back.
+  $: if (!SECTIONS.some((s) => s.id === section)) section = 'tokens';
 </script>
 
-{#if withAccess}
+{#if withAccess || withLimits}
   <div class="flex h-full flex-col">
     <nav class="flex gap-1 border-b px-4 pt-2" aria-label="Access sections">
       {#each SECTIONS as s (s.id)}
@@ -86,8 +97,23 @@
             />
           </div>
           <div class="min-h-0 p-4 xl:overflow-auto">
-            <svelte:component this={mod.default} section="tokens" {orgId} {instanceId} {selectedTokenId} {reloadKey} bind:snapshot on:openTeam={(e) => openTeam(e.detail)} />
+            {#if withAccess}
+              <svelte:component this={mod.default} section="tokens" {orgId} {instanceId} {selectedTokenId} {reloadKey} bind:snapshot on:openTeam={(e) => openTeam(e.detail)} />
+            {/if}
+            {#if withLimits && selectedTokenId !== null}
+              <p class="mt-3 text-sm">
+                <button type="button" class="underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" on:click={() => selectedTokenId !== null && openLimits(selectedTokenId)}>Query limits and usage of this token →</button>
+              </p>
+            {:else if !withAccess}
+              <p class="text-sm text-muted-foreground">Select a token's name to see its query limits.</p>
+            {/if}
           </div>
+        </div>
+      {:else if section === 'limits'}
+        <div class="min-h-0 flex-1 overflow-auto p-4">
+          {#await import('./QueryLimitsView.svelte') then lim}
+            <svelte:component this={lim.default} {orgId} {instanceId} focusTokenId={limitsTokenId} on:openToken={(e) => openToken(e.detail)} />
+          {/await}
         </div>
       {:else}
         <div class="min-h-0 flex-1 overflow-auto p-4">

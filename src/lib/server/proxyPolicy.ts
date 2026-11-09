@@ -95,17 +95,20 @@ export function isMemberAllowed(method: string, canonicalPath: string): boolean 
  * raw path without percent-decoding, so an encoded spelling such as
  * `rb%61c` does not reach these routes either.
  */
-const BLOCKED_PATTERNS: readonly RegExp[] = [
-  /^api\/v1\/rbac(\/|$)/,
-  /^api\/v1\/auth\/tokens\/[^/]+\/(teams|permissions)(\/|$)/,
-  /^api\/v1\/auth\/cache\/invalidate$/,
+const ACCESS = 'Arc access control is managed from the Access tab, which previews and records each change';
+const BLOCKED: ReadonlyArray<[RegExp, string]> = [
+  [/^api\/v1\/rbac(\/|$)/, ACCESS],
+  [/^api\/v1\/auth\/tokens\/[^/]+\/(teams|permissions)(\/|$)/, ACCESS],
+  [/^api\/v1\/auth\/cache\/invalidate$/, ACCESS],
+  // Query governance (#10): Arc keeps it per node, so a change through the
+  // load-balanced proxy would land on one random node. The Access tab reads
+  // and writes every node.
+  [/^api\/v1\/governance(\/|$)/, 'Arc query limits are managed from the Access tab, which applies them to every node'],
 ];
 
 /** Why the proxy refuses this path for every role, or null. */
 export function blockedReason(canonicalPath: string): string | null {
-  return BLOCKED_PATTERNS.some((re) => re.test(canonicalPath))
-    ? 'Arc access control is managed from the Access tab, which previews and records each change'
-    : null;
+  return BLOCKED.find(([re]) => re.test(canonicalPath))?.[1] ?? null;
 }
 
 /**

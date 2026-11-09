@@ -2,6 +2,7 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
 import { queryArc } from '$lib/server/arcConnection';
+import { queryFailure } from '$lib/governance';
 
 type AlertCondition = 'greater_than' | 'less_than' | 'equals' | 'not_equals' | 'contains';
 
@@ -52,9 +53,11 @@ export const POST: RequestHandler = async ({ locals, params }) => {
   let result: { rows?: unknown[][] } | null = null;
   try {
     const res = await queryArc(instance.endpoint_url, instance.admin_token, rule.query);
-    if (res.status >= 200 && res.status < 300) {
-      try { result = JSON.parse(res.body.toString('utf-8')); } catch { result = null; }
+    if (res.status < 200 || res.status >= 300) {
+      // Say why, rather than "no results" (a 429 is query governance).
+      return json({ value: null, wouldTrigger: false, error: queryFailure(res.status, res.headers['retry-after']) });
     }
+    try { result = JSON.parse(res.body.toString('utf-8')); } catch { result = null; }
   } catch {
     return json({ error: 'Instance endpoint is not reachable or not allowed' }, { status: 502 });
   }
