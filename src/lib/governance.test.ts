@@ -3,16 +3,12 @@ import {
   isUnlimited,
   limitText,
   mergePolicies,
-  parseLimitsInput,
   parsePolicy,
   parseUsage,
-  queryFailure,
   UNLIMITED,
   usageLines,
-  validateLimits,
-  effectiveOn,
   type Limits,
-  type NodeGovernance,
+  type NodePolicies,
 } from './governance';
 
 const limits = (o: Partial<Limits> = {}): Limits => ({ ...UNLIMITED, ...o });
@@ -31,28 +27,16 @@ describe('parsing', () => {
   });
 });
 
-describe('validation', () => {
-  it('accepts whole numbers from 0, rejects the rest', () => {
-    expect(validateLimits(limits({ max_rows_per_query: 10_000 }))).toBeNull();
-    expect(validateLimits({ ...limits(), rate_limit_per_minute: -1 })).toHaveProperty('rate_limit_per_minute');
-    expect(validateLimits({ ...limits(), max_scan_duration_sec: 1.5 })).toHaveProperty('max_scan_duration_sec');
-  });
-
-  it('parses request bodies strictly', () => {
-    expect(parseLimitsInput(limits({ max_queries_per_day: 500 }))).toEqual(limits({ max_queries_per_day: 500 }));
-    expect(parseLimitsInput({ ...limits(), token_id: 3 })).toBeNull(); // the token comes from the path
-    expect(parseLimitsInput({ rate_limit_per_minute: 5 })).toBeNull(); // every field, as Arc replaces the whole policy
-  });
-});
-
 describe('mergePolicies', () => {
   const p = (tokenId: number, o: Partial<Limits>) => ({ tokenId, ...limits(o) });
-  const node = (nodeId: string, policies: ReturnType<typeof p>[], extra: Partial<NodeGovernance> = {}): NodeGovernance =>
-    ({ nodeId, source: null, servesQueries: true, state: 'on', reason: null, policies, defaults: null, ...extra });
+  const node = (nodeId: string, policies: ReturnType<typeof p>[], extra: Partial<NodePolicies> = {}): NodePolicies =>
+    ({ nodeId, servesQueries: true, state: 'on', policies, ...extra });
+  const rpm = (v: number) => limits({ rate_limit_per_minute: v });
 
   it('is in sync only when every query-serving node holds the same limits', () => {
-    const same = mergePolicies([node('a', [p(5, { rate_limit_per_minute: 60 })]), node('b', [p(5, { rate_limit_per_minute: 60 })])]);
-    expect(same).toEqual([{ tokenId: 5, byNode: { a: limits({ rate_limit_per_minute: 60 }), b: limits({ rate_limit_per_minute: 60 }) }, inSync: true, limits: limits({ rate_limit_per_minute: 60 }) }]);
+    const [v] = mergePolicies([node('a', [p(5, { rate_limit_per_minute: 60 })]), node('b', [p(5, { rate_limit_per_minute: 60 })])]);
+    expect(v).toMatchObject({ tokenId: 5, byNode: { a: rpm(60), b: rpm(60) }, inSync: true, unknownOn: [] });
+    expect(v.shared).toEqual(rpm(60));
   });
 
   it('shows each node\'s values when they differ or one lacks it, with no majority vote', () => {
@@ -61,26 +45,28 @@ describe('mergePolicies', () => {
       node('b', [p(5, { rate_limit_per_minute: 60 })]),
       node('c', [p(5, { rate_limit_per_minute: 10 })]),
       node('d', []),
-      node('e', [], { state: 'unreachable' }),
     ]);
     expect(v.inSync).toBe(false);
-    expect(v.limits).toBeNull();
-    expect(v.byNode).toEqual({ a: limits({ rate_limit_per_minute: 60 }), b: limits({ rate_limit_per_minute: 60 }), c: limits({ rate_limit_per_minute: 10 }), d: null });
+    expect(v.shared.rate_limit_per_minute).toBeNull();
+    expect(v.shared.max_rows_per_query).toBeNull(); // d has no policy at all
+    expect(v.byNode).toEqual({ a: rpm(60), b: rpm(60), c: rpm(10), d: null });
+  });
+
+  it('is not in sync while a query-serving node did not answer', () => {
+    const [v] = mergePolicies([node('a', [p(5, { rate_limit_per_minute: 60 })]), node('e', [], { state: 'unreachable' }), node('f', [], { state: 'off' })]);
+    expect(v).toMatchObject({ inSync: false, unknownOn: ['e', 'f'] });
+    expect(v.shared).toEqual(rpm(60)); // the nodes that answered agree
   });
 
   it('leaves compactors out of the comparison', () => {
-    const [v] = mergePolicies([node('a', [p(5, { max_rows_per_query: 100 })]), node('k', [], { servesQueries: false })]);
+    const [v] = mergePolicies([node('a', [p(5, { max_rows_per_query: 100 })]), node('k', [], { servesQueries: false }), node('k2', [], { servesQueries: false, state: 'unreachable' })]);
     expect(v.inSync).toBe(true);
+    expect(v.byNode).toHaveProperty('k', null);
   });
-});
 
-describe('effectiveOn', () => {
-  const base: NodeGovernance = { nodeId: 'a', source: null, servesQueries: true, state: 'on', reason: null, policies: [], defaults: null };
-
-  it('uses the token\'s policy, else the node\'s defaults, else nothing', () => {
-    expect(effectiveOn({ ...base, policies: [{ tokenId: 5, ...limits() }] }, 5)).toEqual({ limits: UNLIMITED, from: 'policy' }); // all zeros = exempt
-    expect(effectiveOn({ ...base, defaults: limits({ max_queries_per_day: 1000 }) }, 5)).toEqual({ limits: limits({ max_queries_per_day: 1000 }), from: 'defaults' });
-    expect(effectiveOn(base, 5)).toEqual({ limits: UNLIMITED, from: 'none' });
+  it('is not in sync when only compactors hold the policy', () => {
+    const [v] = mergePolicies([node('a', []), node('k', [p(5, {})], { servesQueries: false })]);
+    expect(v.inSync).toBe(false);
   });
 });
 
@@ -97,17 +83,14 @@ describe('usageLines', () => {
     ]);
   });
 
+  it('never reports negative use when the limit changed between reads', () => {
+    const [line] = usageLines(limits({ rate_limit_per_minute: 10 }), { ...usage, remainingPerMinute: 30 });
+    expect(line).toMatchObject({ used: 0, state: 'ok' });
+  });
+
   it('treats no policy as unlimited', () => {
     expect(usageLines(null, usage).every((l) => l.state === 'unlimited')).toBe(true);
     expect(isUnlimited(UNLIMITED)).toBe(true);
     expect(limitText('max_rows_per_query', 5000)).toBe('5,000 rows');
-  });
-});
-
-describe('queryFailure', () => {
-  it('names governance throttling instead of reading it as no results', () => {
-    expect(queryFailure(429, '12')).toBe('Throttled by Arc query governance (retry after 12s)');
-    expect(queryFailure(429, undefined)).toBe('Throttled by Arc query governance');
-    expect(queryFailure(500, undefined)).toBe('Arc answered 500');
   });
 });

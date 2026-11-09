@@ -398,10 +398,10 @@ export function applyAccessChange(orgId: string, id: string, change: RbacChange,
 
 const governancePath = (orgId: string, id: string) => `/api/v1/orgs/${encodeURIComponent(orgId)}/instances/${encodeURIComponent(id)}/governance`;
 
-export function getGovernance(orgId: string, id: string): Promise<GovernanceView> {
-  return clusterFetch(governancePath(orgId, id));
+export function getGovernance(orgId: string, id: string, signal?: AbortSignal): Promise<GovernanceView> {
+  return clusterFetch(governancePath(orgId, id), signal);
 }
 
-export async function getTokenQueryUsage(orgId: string, id: string, tokenId: number): Promise<NodeUsage[]> {
-  return (await clusterFetch<{ nodes: NodeUsage[] }>(`${governancePath(orgId, id)}/${tokenId}/usage`)).nodes;
+export async function getTokenQueryUsage(orgId: string, id: string, tokenId: number, signal?: AbortSignal): Promise<NodeUsage[]> {
+  return (await clusterFetch<{ nodes: NodeUsage[] }>(`${governancePath(orgId, id)}/${tokenId}/usage`, signal)).nodes;
 }

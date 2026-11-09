@@ -8,6 +8,8 @@
  * src/lib/server/governanceAdmin.ts.
  */
 
+import type { ClusterErrorCode } from './cluster';
+
 export const LIMIT_FIELDS = [
   'rate_limit_per_minute',
   'rate_limit_per_hour',
@@ -28,9 +30,6 @@ export const LIMIT_INFO: Record<LimitField, { label: string; unit: string; help:
   max_rows_per_query: { label: 'Rows per query', unit: 'rows', help: 'Results beyond this are cut off (marked rows_capped), not refused.' },
   max_scan_duration_sec: { label: 'Query time limit', unit: 'seconds', help: "Replaces Arc's global query timeout for this token; it can be longer than the global one." },
 };
-
-/** Upper bound accepted by the form; far beyond any sensible limit, within Arc's int. */
-export const LIMIT_MAX = 1_000_000_000;
 
 export const UNLIMITED: Limits = Object.fromEntries(LIMIT_FIELDS.map((f) => [f, 0])) as Limits;
 
@@ -79,26 +78,6 @@ export function parseUsage(v: unknown): Usage | null {
   };
 }
 
-/** Field errors for limits typed in a form, or null. */
-export function validateLimits(raw: Record<LimitField, unknown>): Record<string, string> | null {
-  const errors: Record<string, string> = {};
-  for (const f of LIMIT_FIELDS) {
-    const v = raw[f];
-    if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0 || v > LIMIT_MAX) {
-      errors[f] = `A whole number from 0 (unlimited) to ${LIMIT_MAX.toLocaleString('en-US')}`;
-    }
-  }
-  return Object.keys(errors).length ? errors : null;
-}
-
-/** Limits from a request body, checked field by field; null if malformed. */
-export function parseLimitsInput(v: unknown): Limits | null {
-  const o = obj(v);
-  if (!o || Object.keys(o).some((k) => !(LIMIT_FIELDS as readonly string[]).includes(k))) return null;
-  const limits = Object.fromEntries(LIMIT_FIELDS.map((f) => [f, o[f]])) as Record<LimitField, unknown>;
-  return validateLimits(limits) ? null : (limits as Limits);
-}
-
 export function limitsEqual(a: Limits, b: Limits): boolean {
   return LIMIT_FIELDS.every((f) => a[f] === b[f]);
 }
@@ -112,14 +91,20 @@ export function isUnlimited(l: Limits): boolean {
 
 /** What Launchpad found on one node. */
 export type NodeGovernanceState =
-  /** Governance answers: `policies` is this node's list. */
+  /** Governance answers. */
   | 'on'
   /** Governance is not enabled (or not licensed at boot) on this node. */
   | 'off'
   /** Arc refused: the license lapsed, or the stored token is not admin. */
   | 'refused'
-  /** Launchpad could not reach or verify this node. */
+  /** Launchpad could not reach or verify this node, or Arc failed. */
   | 'unreachable';
+
+/** Why a node is not 'on': a code for logic, a sentence (written by Launchpad) to show. */
+export interface NodeIssue {
+  code: ClusterErrorCode | 'governance_off' | 'not_licensed';
+  message: string;
+}
 
 export interface NodeGovernance {
   nodeId: string;
@@ -128,50 +113,60 @@ export interface NodeGovernance {
   /** Compactors forward queries before governance runs: their limits never apply. */
   servesQueries: boolean;
   state: NodeGovernanceState;
-  /** Why the node is not 'on'. */
-  reason: string | null;
-  policies: Policy[];
-  /** Limits a token without a policy gets on this node (Arc config defaults). */
+  issue: NodeIssue | null;
+  /** Limits a token without a policy gets on this node (Arc config defaults); null when none or not known. */
   defaults: Limits | null;
+  /** False when the defaults could not be read: then `defaults` null means unknown, not "none". */
+  defaultsKnown: boolean;
+}
+
+/** One node's policies, as read. Server-side only; the view carries the merge. */
+export interface NodePolicies {
+  nodeId: string;
+  state: NodeGovernanceState;
+  servesQueries: boolean;
+  policies: Policy[];
 }
 
 export interface TokenPolicyView {
   tokenId: number;
   /** Each 'on' node's policy for this token; null where it has none. */
   byNode: Record<string, Limits | null>;
-  /** Every query-serving 'on' node holds the same limits. */
+  /** Per limit, the value every query-serving 'on' node holds; null where they differ. */
+  shared: Record<LimitField, number | null>;
+  /** Every query-serving node is 'on' and holds the same limits. */
   inSync: boolean;
-  /** Those limits, when in sync. */
-  limits: Limits | null;
+  /** Query-serving nodes whose limits are not known (off, refused or unreachable). */
+  unknownOn: string[];
 }
 
 /**
  * Per token, what every node that answered holds. No majority vote: nodes
  * either all agree or the view shows each node's values. Compactors are left
- * out of the comparison (they never apply limits).
+ * out of the comparison (they never apply limits); a query-serving node that
+ * did not answer keeps the token out of sync, as its limits are unknown.
  */
-export function mergePolicies(nodes: NodeGovernance[]): TokenPolicyView[] {
+export function mergePolicies(nodes: NodePolicies[]): TokenPolicyView[] {
   const on = nodes.filter((n) => n.state === 'on');
-  const tokenIds = new Set(on.flatMap((n) => n.policies.map((p) => p.tokenId)));
+  const unknownOn = nodes.filter((n) => n.servesQueries && n.state !== 'on').map((n) => n.nodeId);
+  const index = on.map((n) => ({ node: n, byToken: new Map(n.policies.map(({ tokenId, ...l }) => [tokenId, l as Limits])) }));
+  const tokenIds = new Set<number>();
+  for (const { byToken } of index) for (const id of byToken.keys()) tokenIds.add(id);
   return [...tokenIds].sort((a, b) => a - b).map((tokenId) => {
     const byNode: Record<string, Limits | null> = {};
-    for (const n of on) {
-      const p = n.policies.find((x) => x.tokenId === tokenId);
-      byNode[n.nodeId] = p ? parseLimits(p) : null;
+    const serving: Array<Limits | null> = [];
+    for (const { node, byToken } of index) {
+      const l = byToken.get(tokenId) ?? null;
+      byNode[node.nodeId] = l;
+      if (node.servesQueries) serving.push(l);
     }
-    const serving = on.filter((n) => n.servesQueries).map((n) => byNode[n.nodeId]);
-    const first = serving[0] ?? null;
-    const inSync = serving.length > 0 && serving.every((l) => l !== null && first !== null && limitsEqual(l, first));
-    return { tokenId, byNode, inSync, limits: inSync ? first : null };
+    const shared = Object.fromEntries(LIMIT_FIELDS.map((f) => {
+      const first = serving[0]?.[f];
+      return [f, serving.length > 0 && first !== undefined && serving.every((l) => l?.[f] === first) ? first : null];
+    })) as Record<LimitField, number | null>;
+    const inSync = unknownOn.length === 0 && serving.length > 0 && serving.every((l) => l !== null) && LIMIT_FIELDS.every((f) => shared[f] !== null);
+    return { tokenId, byNode, shared, inSync, unknownOn };
   });
-}
-
-/** The limits one node applies to a token: its own policy, else that node's defaults. */
-export function effectiveOn(node: NodeGovernance, tokenId: number): { limits: Limits; from: 'policy' | 'defaults' | 'none' } {
-  const own = node.policies.find((p) => p.tokenId === tokenId);
-  if (own) return { limits: parseLimits(own), from: 'policy' };
-  if (node.defaults && !isUnlimited(node.defaults)) return { limits: node.defaults, from: 'defaults' };
-  return { limits: UNLIMITED, from: 'none' };
 }
 
 // ---------------------------------------------------------------------------
@@ -204,8 +199,8 @@ export function usageLines(limits: Limits | null, usage: Usage): UsageLine[] {
   // Arc only counts what has a limit: a rate limiter or quota counter exists
   // only once that field is set, so an unset limit has no meaningful count.
   return [
-    line('rate_limit_per_minute', l.rate_limit_per_minute - usage.remainingPerMinute),
-    line('rate_limit_per_hour', l.rate_limit_per_hour - usage.remainingPerHour),
+    line('rate_limit_per_minute', Math.max(0, l.rate_limit_per_minute - usage.remainingPerMinute)),
+    line('rate_limit_per_hour', Math.max(0, l.rate_limit_per_hour - usage.remainingPerHour)),
     line('max_queries_per_hour', usage.queriesThisHour),
     line('max_queries_per_day', usage.queriesThisDay),
   ];
@@ -216,18 +211,6 @@ export function limitText(field: LimitField, value: number): string {
   return value === 0 ? 'unlimited' : `${value.toLocaleString('en-US')} ${LIMIT_INFO[field].unit}`;
 }
 
-/**
- * Why Arc refused a query, in words. A 429 is query governance: the token hit
- * a rate limit or quota (Launchpad's own token is governed like any other).
- */
-export function queryFailure(status: number, retryAfter: string | string[] | undefined): string {
-  if (status === 429) {
-    const secs = Number(Array.isArray(retryAfter) ? retryAfter[0] : retryAfter);
-    return `Throttled by Arc query governance${Number.isFinite(secs) && secs > 0 ? ` (retry after ${secs}s)` : ''}`;
-  }
-  return `Arc answered ${status}`;
-}
-
 // ---------------------------------------------------------------------------
 // API contract between Launchpad's governance routes and the Access tab
 
@@ -235,6 +218,8 @@ export interface GovernanceView {
   nodes: NodeGovernance[];
   policies: TokenPolicyView[];
   tokens: Array<{ id: number; name: string }>;
+  /** Arc's token list was read; otherwise a policy's token cannot be called deleted. */
+  tokensLoaded: boolean;
   /** The token Launchpad itself uses for this instance (console, alerts…), when Arc says. */
   launchpadTokenId: number | null;
   truncated: boolean;
@@ -245,7 +230,7 @@ export interface NodeUsage {
   nodeId: string;
   source: string | null;
   state: 'on' | 'unavailable';
-  reason: string | null;
+  issue: NodeIssue | null;
   usage: Usage | null;
   /** The limits this node applies to the token, and where they come from. */
   effective: { limits: Limits; from: 'policy' | 'defaults' | 'none' } | null;

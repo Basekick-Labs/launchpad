@@ -64,8 +64,11 @@
     ...(withAccess ? [{ id: 'teams' as const, label: 'Teams & roles' }] : []),
     ...(withLimits ? [{ id: 'limits' as const, label: 'Query limits' }] : []),
   ];
-  // A section that is not offered (e.g. ?section=limits without governance) falls back.
-  $: if (!SECTIONS.some((s) => s.id === section)) section = 'tokens';
+  // A section not offered (yet: capabilities load after mount) shows Tokens
+  // without forgetting what the URL asked for.
+  $: shown = SECTIONS.some((s) => s.id === section) ? section : 'tokens';
+  // AccessView only when RBAC is on; Query limits alone does not need it.
+  $: accessModule = withAccess ? import('./AccessView.svelte') : Promise.resolve(null);
 </script>
 
 {#if withAccess || withLimits}
@@ -74,16 +77,16 @@
       {#each SECTIONS as s (s.id)}
         <button
           type="button"
-          aria-current={section === s.id ? 'page' : undefined}
+          aria-current={shown === s.id ? 'page' : undefined}
           on:click={() => show(s.id)}
           class="-mb-px border-b-2 px-3 py-2 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring
-            {section === s.id ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}"
+            {shown === s.id ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}"
         >{s.label}</button>
       {/each}
     </nav>
 
-    {#await import('./AccessView.svelte') then mod}
-      {#if section === 'tokens'}
+    {#await accessModule then mod}
+      {#if shown === 'tokens'}
         <div class="grid min-h-0 flex-1 grid-cols-1 overflow-auto xl:grid-cols-2 xl:overflow-hidden">
           <div class="min-h-0 xl:overflow-auto xl:border-r">
             <TokenManager
@@ -97,7 +100,7 @@
             />
           </div>
           <div class="min-h-0 p-4 xl:overflow-auto">
-            {#if withAccess}
+            {#if mod}
               <svelte:component this={mod.default} section="tokens" {orgId} {instanceId} {selectedTokenId} {reloadKey} bind:snapshot on:openTeam={(e) => openTeam(e.detail)} />
             {/if}
             {#if withLimits && selectedTokenId !== null}
@@ -109,17 +112,21 @@
             {/if}
           </div>
         </div>
-      {:else if section === 'limits'}
+      {:else if shown === 'limits'}
         <div class="min-h-0 flex-1 overflow-auto p-4">
           {#await import('./QueryLimitsView.svelte') then lim}
             <svelte:component this={lim.default} {orgId} {instanceId} focusTokenId={limitsTokenId} on:openToken={(e) => openToken(e.detail)} />
+          {:catch}
+            <p class="text-sm text-destructive" role="alert">Could not load this section. Reload the page to try again.</p>
           {/await}
         </div>
-      {:else}
+      {:else if mod}
         <div class="min-h-0 flex-1 overflow-auto p-4">
           <svelte:component this={mod.default} section="teams" {orgId} {instanceId} {focusTeamId} {reloadKey} bind:snapshot on:openToken={(e) => openToken(e.detail)} />
         </div>
       {/if}
+    {:catch}
+      <p class="p-4 text-sm text-destructive" role="alert">Could not load this section. Reload the page to try again.</p>
     {/await}
   </div>
 {:else}
