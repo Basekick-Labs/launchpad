@@ -1,5 +1,6 @@
 import { json } from '@sveltejs/kit';
 import { requireInstanceRole } from '$lib/server/orgAccess';
+import { readBoundedJsonBody } from '$lib/server/util';
 import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
 import { getInstance, deleteInstance, getInstanceEvents, updateInstanceConnection } from '$lib/server/instance';
@@ -35,12 +36,10 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
   const access = requireInstanceRole(locals.user, params.org_id, params.id, 'admin');
   if (access instanceof Response) return access;
 
-  let body: { name?: string; endpoint_url?: string; admin_token?: string | null; node_scheme?: unknown };
-  try {
-    body = await request.json();
-  } catch {
-    return json({ error: 'Request body must be JSON' }, { status: 400 });
-  }
+  // Bounded and content-type checked (413/415/400 on a bad body).
+  const body = (await readBoundedJsonBody(request)) as
+    | { name?: string; endpoint_url?: string; admin_token?: string | null; node_scheme?: unknown }
+    | null;
   const { name, endpoint_url, admin_token, node_scheme } = body ?? {};
   if (node_scheme !== undefined && node_scheme !== null && node_scheme !== 'http' && node_scheme !== 'https') {
     return json({ error: 'node_scheme must be "http", "https" or null' }, { status: 400 });

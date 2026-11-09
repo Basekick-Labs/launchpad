@@ -4,7 +4,7 @@ import { allowPrivateEndpoints } from '$lib/server/arcConnection';
 import { requireInstanceRole } from '$lib/server/orgAccess';
 import { applyRbacChange, getRbacSnapshot } from '$lib/server/rbacAdmin';
 import { rbacErrorResponse } from '$lib/server/rbacResponse';
-import { readSmallJson } from '$lib/server/util';
+import { readBoundedJsonBody } from '$lib/server/util';
 import { parseChange } from '$lib/rbac';
 
 /** A change request is a handful of fields plus a 16-character fingerprint. */
@@ -30,7 +30,8 @@ export const GET: RequestHandler = async ({ locals, params }) => {
 export const POST: RequestHandler = async ({ locals, params, request }) => {
   const access = requireInstanceRole(locals.user, params.org_id, params.id, 'admin');
   if (access instanceof Response) return access;
-  const body = (await readSmallJson(request, MAX_BODY_BYTES)) as { change?: unknown; fingerprint?: unknown } | null;
+  // Bounded and content-type checked (413/415/400 on a bad body).
+  const body = (await readBoundedJsonBody(request, MAX_BODY_BYTES)) as { change?: unknown; fingerprint?: unknown } | null;
   const change = parseChange(body?.change);
   if (!change || typeof body?.fingerprint !== 'string' || !/^[0-9a-f]{16}$/.test(body.fingerprint)) {
     return json({ error: 'invalid', message: 'Unknown or malformed change' }, { status: 400 });

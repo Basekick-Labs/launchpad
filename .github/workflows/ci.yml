@@ -63,3 +63,8 @@ jobs:
         run: npm run build
         env:
           LAUNCHPAD_JWT_SECRET: ci-build-only-not-a-real-secret
+
+      # Exercise the locked adapter, not just an in-memory Request mock. This
+      # also asserts peak RSS for concurrent chunked over-limit requests.
+      - name: Request body integration and memory regression
+        run: npm run test:body-limits
