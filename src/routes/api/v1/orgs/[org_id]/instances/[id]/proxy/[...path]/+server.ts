@@ -7,7 +7,7 @@ import { getInstance } from '$lib/server/instance';
 import { allowPrivateEndpoints } from '$lib/server/arcConnection';
 import { assertSafeResolvedUrl, type ResolvedTarget } from '$lib/server/ssrf';
 import { streamUpstreamWithFallback, ResponseTooLargeError } from '$lib/server/arcProxy';
-import { canonicalizePath, isAuditedChange, isDryRun, isMemberAllowed, isNonChangeStatus } from '$lib/server/proxyPolicy';
+import { blockedReason, canonicalizePath, isAuditedChange, isDryRun, isMemberAllowed, isNonChangeStatus } from '$lib/server/proxyPolicy';
 import { recordChange } from '$lib/server/instanceChangeLog';
 
 // Only these response headers from the upstream Arc server are forwarded back
@@ -78,6 +78,10 @@ async function proxyRequest(request: Request, params: { org_id: string; id: stri
     if (!isMemberAllowed(request.method, canonicalPath)) {
       return json({ error: 'Forbidden' }, { status: 403 });
     }
+  }
+  const blocked = blockedReason(canonicalPath);
+  if (blocked) {
+    return json({ error: blocked }, { status: 403 });
   }
 
   const instance = getInstance(params.id);

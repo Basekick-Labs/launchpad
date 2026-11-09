@@ -9,7 +9,7 @@
   import SQLConsole from '$lib/components/SQLConsole.svelte';
   import SchemaExplorer from '$lib/components/SchemaExplorer.svelte';
   import Monitoring from '$lib/components/Monitoring.svelte';
-  import TokenManager from '$lib/components/TokenManager.svelte';
+  import TokensView from '$lib/components/access/TokensView.svelte';
   import RetentionPolicies from '$lib/components/RetentionPolicies.svelte';
   import ContinuousQueries from '$lib/components/ContinuousQueries.svelte';
   import Alerts from '$lib/components/Alerts.svelte';
@@ -93,9 +93,20 @@
   ];
 
   let capabilities: CapabilitiesView | null = null;
+  // Enterprise instances get access control in the Tokens tab (admin-only,
+  // like the capability). RBAC is 'available', or 'unlicensed' on an instance
+  // that has a license configured (lapsed or failed): tokens can still be in
+  // teams there, and removing them is the way out. A plain OSS Arc also
+  // answers RBAC as unlicensed, but has no license at all: Tokens only.
+  $: rbacServed =
+    capabilityIn(capabilities, 'rbac', ['available']) ||
+    (capabilityIn(capabilities, 'rbac', ['unlicensed']) && !!capabilities?.showEnterprise);
+
   // Clustering is on (not just licensed): Monitoring then points to the Cluster tab.
   $: clusterServed = capabilityIn(capabilities, 'cluster', ['available']);
-  $: visibleTabs = tabs.filter((t) => !t.capability || capabilityIn(capabilities, t.capability, t.showWhen ?? ['available']));
+  $: visibleTabs = tabs
+    .filter((t) => !t.capability || capabilityIn(capabilities, t.capability, t.showWhen ?? ['available']))
+    .map((t) => (t.id === 'tokens' && rbacServed ? { ...t, label: 'Access' } : t));
 
   onMount(async () => {
     if (!org) return;
@@ -197,8 +208,10 @@
             <svelte:component this={mod.default} orgId={org.id} {instanceId} />
           {/key}
         {/await}
-      {:else if activeView === 'tokens'}
-        <TokenManager {client} arcVersion={connection?.arc_version ?? ''} />
+      {:else if activeView === 'tokens' && org}
+        {#key instanceId}
+          <TokensView {client} arcVersion={connection?.arc_version ?? ''} orgId={org.id} {instanceId} withAccess={rbacServed} />
+        {/key}
       {/if}
     {/if}
   </div>

@@ -80,6 +80,35 @@ export function isMemberAllowed(method: string, canonicalPath: string): boolean 
 }
 
 /**
+ * Arc routes the proxy refuses even to owners/admins, because the Access tab
+ * handles them (#8): RBAC administration and a token's team memberships and
+ * effective permissions. The Access tab previews what a change does to every
+ * token before it is made and records who made it.
+ *
+ * This channels access-control changes; it is not a security boundary
+ * against owners/admins, who are trusted with the instance: they can still
+ * manage tokens through the proxy (including granting Arc `admin`, which
+ * bypasses RBAC) and can set the stored token itself. Those token changes
+ * are recorded in the change log like every other change.
+ *
+ * Matched on the canonical path. Arc (Fiber, default config) routes on the
+ * raw path without percent-decoding, so an encoded spelling such as
+ * `rb%61c` does not reach these routes either.
+ */
+const BLOCKED_PATTERNS: readonly RegExp[] = [
+  /^api\/v1\/rbac(\/|$)/,
+  /^api\/v1\/auth\/tokens\/[^/]+\/(teams|permissions)(\/|$)/,
+  /^api\/v1\/auth\/cache\/invalidate$/,
+];
+
+/** Why the proxy refuses this path for every role, or null. */
+export function blockedReason(canonicalPath: string): string | null {
+  return BLOCKED_PATTERNS.some((re) => re.test(canonicalPath))
+    ? 'Arc access control is managed from the Access tab, which previews and records each change'
+    : null;
+}
+
+/**
  * Requests that are data, not configuration: SQL (Arc runs reads over POST)
  * and ingestion/imports. Recording each would bury the changes that matter.
  * Data-changing SQL (DELETE, DDL) is therefore not in the change log.
