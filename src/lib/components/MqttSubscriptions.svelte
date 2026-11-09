@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { formatTopicMapping, parseTopicMapping } from '$lib/mqttTopicMapping';
+  import { formatTopicMapping, parseTopicMapping, topicMappingForUpdate } from '$lib/mqttTopicMapping';
   import type {
     ArcClient,
     MqttSubscription,
@@ -170,7 +170,6 @@
     return [...new Set(topics)];
   }
 
-
   function openCreate() {
     editing = null;
     fName = '';
@@ -267,15 +266,14 @@
     const problem = validateForm();
     if (problem) { formError = problem; return; }
 
-    const mappingChanged = !editing || fTopicMapping !== originalTopicMapping;
     let parsedTopicMapping: MqttTopicMapping | undefined;
-    if (mappingChanged) {
-      try {
-        parsedTopicMapping = parseTopicMapping(fTopicMapping);
-      } catch (err) {
-        formError = err instanceof Error ? err.message : 'Invalid topic mapping';
-        return;
-      }
+    try {
+      parsedTopicMapping = editing
+        ? topicMappingForUpdate(originalTopicMapping, fTopicMapping)
+        : parseTopicMapping(fTopicMapping);
+    } catch (err) {
+      formError = err instanceof Error ? err.message : 'Invalid topic mapping';
+      return;
     }
 
     isSaving = true;
@@ -309,10 +307,10 @@
           clean_session: fCleanSession,
           ...tuning,
         };
-        // Arc validates topic_mapping on update. Omit it unless the user
-        // changed the editor: this keeps legacy/invalid stored filters intact
-        // when changing an unrelated field such as keep-alive.
-        if (mappingChanged) body.topic_mapping = parsedTopicMapping ?? {};
+        // Arc validates topic_mapping on update. It is undefined unless the
+        // user changed the editor, which keeps legacy/invalid stored filters
+        // intact when changing an unrelated field such as keep-alive.
+        if (parsedTopicMapping) body.topic_mapping = parsedTopicMapping;
         // Only send password when the user typed a new one or explicitly cleared it.
         if (fClearPassword) body.password = '';
         else if (fPassword) body.password = fPassword;

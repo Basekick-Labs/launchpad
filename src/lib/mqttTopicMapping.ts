@@ -42,6 +42,9 @@ function validateRule(topic: string, value: unknown): MqttTopicMappingRule {
     if (!Array.isArray(value.tags_from_topic)) {
       throw new Error(`tags_from_topic for "${topic}" must be an array`);
     }
+    if (value.tags_from_topic.length === 0) {
+      throw new Error(`tags_from_topic for "${topic}" must list at least one tag`);
+    }
     value.tags_from_topic.forEach((item, index) => {
       if (!isRecord(item) || !Number.isInteger(item.position) || (item.position as number) < 0 ||
           typeof item.tag_name !== 'string' || item.tag_name.trim() === '' ||
@@ -75,19 +78,25 @@ export function parseTopicMapping(raw: string): MqttTopicMapping {
   const input = raw.trim();
   if (!input) return {};
 
+  const lines = input.split('\n').map((line) => line.trim()).filter(Boolean);
+
   if (input.startsWith('{')) {
     let parsed: unknown;
+    let jsonError: string | undefined;
     try {
       parsed = JSON.parse(input);
     } catch (error) {
-      const detail = error instanceof Error ? error.message : 'invalid JSON';
-      throw new Error(`Invalid topic mapping JSON: ${detail}`);
+      jsonError = error instanceof Error ? error.message : 'invalid JSON';
     }
-    return validateMapping(parsed);
+    if (jsonError === undefined) return validateMapping(parsed);
+    // A legacy topic can itself start with '{' ("{site}/temp = db"). Text that
+    // isn't JSON but has an '=' on every line is the line format.
+    if (!lines.every((line) => line.includes('='))) {
+      throw new Error(`Invalid topic mapping JSON: ${jsonError}`);
+    }
   }
 
   const mapping: MqttTopicMapping = {};
-  const lines = input.split('\n').map((line) => line.trim()).filter(Boolean);
   for (const [index, line] of lines.entries()) {
     const delimiter = line.lastIndexOf('=');
     if (delimiter < 0) throw new Error(`Topic mapping line ${index + 1} must use "topic = database"`);
@@ -97,4 +106,14 @@ export function parseTopicMapping(raw: string): MqttTopicMapping {
     mapping[topic] = database;
   }
   return mapping;
+}
+
+/**
+ * The topic_mapping to send when updating a subscription: undefined when the
+ * editor text is unchanged, so Arc keeps the stored mapping as is (#97), and
+ * {} when the user cleared it. Throws on invalid input, like parseTopicMapping.
+ */
+export function topicMappingForUpdate(original: string, current: string): MqttTopicMapping | undefined {
+  if (current === original) return undefined;
+  return parseTopicMapping(current);
 }
