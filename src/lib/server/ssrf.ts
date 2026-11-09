@@ -393,6 +393,9 @@ export async function safePostJson(
     body: payload,
     headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
     timeoutMs: opts.timeoutMs ?? 10_000,
+    // The response body is intentionally discarded; cap it to prevent a
+    // configured webhook endpoint from forcing unbounded buffering.
+    maxResponseBytes: 64 * 1024,
   });
   return { status: res.status };
 }
