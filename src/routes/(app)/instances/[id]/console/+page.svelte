@@ -93,6 +93,8 @@
   ];
 
   let capabilities: CapabilitiesView | null = null;
+  // Clustering is on (not just licensed): Monitoring then points to the Cluster tab.
+  $: clusterServed = capabilityIn(capabilities, 'cluster', ['available']);
   $: visibleTabs = tabs.filter((t) => !t.capability || capabilityIn(capabilities, t.capability, t.showWhen ?? ['available']));
 
   onMount(async () => {
@@ -176,7 +178,7 @@
       {#if activeView === 'console'}
         <SQLConsole {client} on:queryExecuted={handleQueryExecuted} />
       {:else if activeView === 'monitoring'}
-        <Monitoring {client} />
+        <Monitoring {client} onOpenCluster={clusterServed ? () => setView('cluster') : null} />
       {:else if activeView === 'logs'}
         <LogExplorer {client} />
       {:else if activeView === 'retention'}

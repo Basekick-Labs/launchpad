@@ -8,6 +8,12 @@
   import { RefreshCw, Pause, Play, Activity } from 'lucide-svelte';
 
   export let client: ArcClient;
+  /**
+   * Set when the instance is an Arc cluster: these metrics then come from
+   * whichever node the endpoint reaches (behind a load balancer, possibly a
+   * different one each refresh), so point to the per-node Cluster view.
+   */
+  export let onOpenCluster: (() => void) | null = null;
 
   let autoRefresh = true;
   let refreshInterval: ReturnType<typeof setInterval> | null = null;
@@ -187,6 +193,16 @@
 
   <!-- Content -->
   <div class="flex-1 overflow-auto p-6">
+    {#if onOpenCluster}
+      <div role="note" class="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-100">
+        <span>
+          This instance is a cluster. Monitoring shows only the node your endpoint reaches, which can change between
+          refreshes behind a load balancer. Per-node metrics and logs are in the Cluster view.
+        </span>
+        <Button variant="outline" size="sm" on:click={onOpenCluster}>Open Cluster</Button>
+      </div>
+    {/if}
+
     {#if error}
       <div class="mb-6 rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-destructive">
         {error}
