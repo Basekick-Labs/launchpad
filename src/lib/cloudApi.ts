@@ -368,7 +368,11 @@ async function accessFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await apiFetch(path, init);
   if (res.ok) return res.json();
   const body = (await res.json().catch(() => null)) as { error?: string; message?: string; fields?: Record<string, string> } | null;
-  const code = body?.message ? body.error ?? 'error' : res.status === 401 || res.status === 403 ? 'forbidden' : 'error';
+  // Access routes answer {error: code, message}; the shared auth check answers
+  // {error: 'Forbidden'} without a message.
+  let code = 'error';
+  if (body?.message) code = body.error ?? 'error';
+  else if (res.status === 401 || res.status === 403) code = 'forbidden';
   throw new AccessApiError(code, body?.message ?? body?.error ?? `Request failed (${res.status})`, body?.fields);
 }
 
@@ -379,8 +383,9 @@ export function getAccess(orgId: string, id: string): Promise<RbacSnapshot> {
 }
 
 export interface AccessChangeOutcome {
-  result: 'applied' | 'applied_after_error' | 'not_applied' | 'unknown';
-  snapshot: RbacSnapshot;
+  result: 'applied' | 'applied_after_error' | 'not_visible' | 'unknown';
+  /** Null when the tree could not be read back: reload it. */
+  snapshot: RbacSnapshot | null;
 }
 
 export function applyAccessChange(orgId: string, id: string, change: RbacChange, fingerprint: string): Promise<AccessChangeOutcome> {

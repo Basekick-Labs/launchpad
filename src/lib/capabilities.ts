@@ -208,9 +208,9 @@ export function parseClusterInfo(value: unknown): ClusterInfo | null {
 }
 
 /** Arc's license-gate wording (e.g. internal/api/tiering.go). */
-const LICENSE_403 = /requires an enterprise license/i;
+export const LICENSE_403 = /requires an enterprise license/i;
 /** auth.RequireAdmin's wording; it runs before the license gate. */
-const ADMIN_403 = /admin required|permission denied/i;
+export const ADMIN_403 = /admin required|permission denied/i;
 
 /**
  * True when the license keeps Enterprise features on. v26.09.3 relays a

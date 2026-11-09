@@ -54,7 +54,8 @@ export interface RbacMeasurementPermission {
 export interface RbacToken {
   id: number;
   name: string;
-  permissions: string[];
+  permissions: RbacPermission[];
+  /** False when disabled or expired. */
   enabled: boolean;
 }
 
@@ -122,12 +123,13 @@ export function parseMeasurementPermission(v: unknown): RbacMeasurementPermissio
     ? { id: mid, roleId, measurementPattern: str(o.measurement_pattern, 256), permissions: perms(o.permissions) }
     : null;
 }
-export function parseToken(v: unknown): RbacToken | null {
+/** `now` decides whether an expiry has passed: Arc refuses expired tokens outright. */
+export function parseToken(v: unknown, now = Date.now()): RbacToken | null {
   const o = obj(v);
   const tid = id(o?.id);
-  return o && tid
-    ? { id: tid, name: str(o.name, 128), permissions: asList(o.permissions).filter((p): p is string => typeof p === 'string'), enabled: o.enabled !== false }
-    : null;
+  if (!o || !tid) return null;
+  const expires = typeof o.expires_at === 'string' ? Date.parse(o.expires_at) : NaN;
+  return { id: tid, name: str(o.name, 128), permissions: perms(o.permissions), enabled: o.enabled !== false && !(expires <= now) };
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +138,8 @@ export function parseToken(v: unknown): RbacToken | null {
 export interface Grant {
   teamId: number;
   roleId: number;
+  /** The measurement permission this grant comes from; null for a database-wide role grant. */
+  mpId: number | null;
   databasePattern: string;
   /** null = every measurement in the matched databases. */
   measurementPattern: string | null;
@@ -145,6 +149,8 @@ export interface Grant {
 export type AccessMode =
   /** Holds `admin`: RBAC does not apply. */
   | 'admin_bypass'
+  /** In teams, but the license has no RBAC, so their grants cannot be read. */
+  | 'rbac_unknown'
   /** Disabled token: nothing. */
   | 'disabled'
   /** In at least one team: exactly the grants listed, nothing else. */
@@ -163,33 +169,74 @@ export interface TokenAccess {
   routeGate: { query: boolean; ingest: boolean };
 }
 
+interface Index {
+  teams: Map<number, RbacTeam>;
+  rolesByTeam: Map<number, RbacRole[]>;
+  mpsByRole: Map<number, RbacMeasurementPermission[]>;
+  tokens: Map<number, RbacToken>;
+}
+
+/** Lookups built once per snapshot (snapshots are never mutated in place). */
+const indexes = new WeakMap<RbacSnapshot, Index>();
+
+function group<T, K>(items: T[], key: (t: T) => K): Map<K, T[]> {
+  const m = new Map<K, T[]>();
+  for (const it of items) {
+    const k = key(it);
+    const list = m.get(k);
+    if (list) list.push(it);
+    else m.set(k, [it]);
+  }
+  return m;
+}
+
+export function indexOf(s: RbacSnapshot): Index {
+  let ix = indexes.get(s);
+  if (!ix) {
+    ix = {
+      teams: new Map(s.teams.map((t) => [t.id, t])),
+      rolesByTeam: group(s.roles, (r) => r.teamId),
+      mpsByRole: group(s.measurementPermissions, (m) => m.roleId),
+      tokens: new Map(s.tokens.map((t) => [t.id, t])),
+    };
+    indexes.set(s, ix);
+  }
+  return ix;
+}
+
 function grantsFor(s: RbacSnapshot, teamIds: number[]): Grant[] {
-  const enabledTeams = new Set(s.teams.filter((t) => teamIds.includes(t.id) && t.enabled).map((t) => t.id));
+  const ix = indexOf(s);
   const grants: Grant[] = [];
-  for (const role of s.roles) {
-    if (!enabledTeams.has(role.teamId)) continue;
-    const mps = s.measurementPermissions.filter((m) => m.roleId === role.id);
-    if (mps.length > 0) {
-      for (const m of mps) {
-        grants.push({ teamId: role.teamId, roleId: role.id, databasePattern: role.databasePattern, measurementPattern: m.measurementPattern, permissions: m.permissions });
+  for (const teamId of teamIds) {
+    if (!ix.teams.get(teamId)?.enabled) continue;
+    for (const role of ix.rolesByTeam.get(teamId) ?? []) {
+      const mps = ix.mpsByRole.get(role.id) ?? [];
+      if (mps.length > 0) {
+        for (const m of mps) {
+          grants.push({ teamId, roleId: role.id, mpId: m.id, databasePattern: role.databasePattern, measurementPattern: m.measurementPattern, permissions: m.permissions });
+        }
+      } else {
+        grants.push({ teamId, roleId: role.id, mpId: null, databasePattern: role.databasePattern, measurementPattern: null, permissions: role.permissions });
       }
-    } else {
-      grants.push({ teamId: role.teamId, roleId: role.id, databasePattern: role.databasePattern, measurementPattern: null, permissions: role.permissions });
     }
   }
+  // Plain code-unit order: the browser and the server must agree (fingerprints).
+  const cmp = (x: string, y: string) => (x < y ? -1 : x > y ? 1 : 0);
   return grants.sort((a, b) =>
-    a.databasePattern.localeCompare(b.databasePattern) || (a.measurementPattern ?? '').localeCompare(b.measurementPattern ?? '') || a.roleId - b.roleId);
+    cmp(a.databasePattern, b.databasePattern) || cmp(a.measurementPattern ?? '', b.measurementPattern ?? '') || a.roleId - b.roleId || (a.mpId ?? 0) - (b.mpId ?? 0));
 }
 
 export function tokenAccess(s: RbacSnapshot, tokenId: number): TokenAccess {
-  const token = s.tokens.find((t) => t.id === tokenId);
+  const token = indexOf(s).tokens.get(tokenId);
   const own = token?.permissions ?? [];
   const gate = { query: own.includes('read') || own.includes('admin'), ingest: own.includes('write') || own.includes('admin') };
   const base = { tokenId, grants: [] as Grant[], ownPermissions: own, routeGate: gate };
-  if (own.includes('admin')) return { ...base, mode: 'admin_bypass' };
+  // Arc refuses a disabled (or expired) token before any permission check.
   if (token && !token.enabled) return { ...base, mode: 'disabled' };
+  if (own.includes('admin')) return { ...base, mode: 'admin_bypass' };
   const teamIds = s.memberships[tokenId] ?? [];
   if (teamIds.length === 0) return { ...base, mode: 'token' };
+  if (!s.licensed) return { ...base, mode: 'rbac_unknown' };
   return { ...base, mode: 'rbac', grants: grantsFor(s, teamIds) };
 }
 
@@ -214,14 +261,16 @@ export type RbacChange =
 /** Changes allowed without an RBAC license (Arc keeps this one ungated: it is how a lockout is undone). */
 export const UNLICENSED_CHANGES: ReadonlySet<RbacChange['kind']> = new Set(['membership.remove']);
 
-/** Field errors for a change, or null. Same rules Arc applies; Arc still decides. */
+const ENCODER = new TextEncoder();
+
+/** Field errors for a change, or null. Arc's name and pattern rules plus a description cap; Arc still decides. */
 export function validateChange(c: RbacChange): Record<string, string> | null {
   const errors: Record<string, string> = {};
   const name = (v: string | undefined, field = 'name') => {
     if (v !== undefined && !RBAC_NAME_RE.test(v)) errors[field] = 'Start with a letter; letters, digits, _ and - only; at most 64 characters';
   };
   const desc = (v: string | undefined) => {
-    if (v !== undefined && new TextEncoder().encode(v).length > RBAC_DESCRIPTION_MAX) errors.description = `At most ${RBAC_DESCRIPTION_MAX} bytes`;
+    if (v !== undefined && ENCODER.encode(v).length > RBAC_DESCRIPTION_MAX) errors.description = `At most ${RBAC_DESCRIPTION_MAX} bytes`;
   };
   const pattern = (v: string | undefined, field: string) => {
     if (v !== undefined && !RBAC_PATTERN_RE.test(v)) errors[field] = 'An exact name, prefix*, *suffix or *; letters, digits, _ and - only';
@@ -243,10 +292,9 @@ export function validateChange(c: RbacChange): Record<string, string> | null {
   return Object.keys(errors).length ? errors : null;
 }
 
-let nextTempId = -1;
-
-/** The snapshot as it would be after `c`. Created items get negative ids. */
+/** The snapshot as it would be after `c`. A created item gets a negative id. */
 export function applyChange(s: RbacSnapshot, c: RbacChange): RbacSnapshot {
+  const tempId = -1;
   const n: RbacSnapshot = {
     ...s,
     orgs: [...s.orgs],
@@ -255,27 +303,37 @@ export function applyChange(s: RbacSnapshot, c: RbacChange): RbacSnapshot {
     measurementPermissions: [...s.measurementPermissions],
     memberships: Object.fromEntries(Object.entries(s.memberships).map(([k, v]) => [k, [...v]])),
   };
-  const dropTeams = (ids: number[]) => {
-    const roleIds = n.roles.filter((r) => ids.includes(r.teamId)).map((r) => r.id);
-    n.teams = n.teams.filter((t) => !ids.includes(t.id));
-    n.roles = n.roles.filter((r) => !ids.includes(r.teamId));
-    n.measurementPermissions = n.measurementPermissions.filter((m) => !roleIds.includes(m.roleId));
-    for (const k of Object.keys(n.memberships)) n.memberships[+k] = n.memberships[+k].filter((t) => !ids.includes(t));
+  const dropTeams = (list: number[]) => {
+    const ids = new Set(list);
+    const roleIds = new Set(n.roles.filter((r) => ids.has(r.teamId)).map((r) => r.id));
+    n.teams = n.teams.filter((t) => !ids.has(t.id));
+    n.roles = n.roles.filter((r) => !ids.has(r.teamId));
+    n.measurementPermissions = n.measurementPermissions.filter((m) => !roleIds.has(m.roleId));
+    for (const k of Object.keys(n.memberships)) {
+      const kept = n.memberships[+k].filter((t) => !ids.has(t));
+      if (kept.length) n.memberships[+k] = kept;
+      else delete n.memberships[+k];
+    }
   };
   switch (c.kind) {
-    case 'org.create': n.orgs.push({ id: nextTempId--, name: c.name, description: c.description }); break;
+    case 'org.create': n.orgs.push({ id: tempId, name: c.name, description: c.description }); break;
     case 'org.update': n.orgs = n.orgs.map((o) => (o.id === c.orgId ? { ...o, ...(c.name !== undefined && { name: c.name }), ...(c.description !== undefined && { description: c.description }) } : o)); break;
     case 'org.delete': dropTeams(n.teams.filter((t) => t.orgId === c.orgId).map((t) => t.id)); n.orgs = n.orgs.filter((o) => o.id !== c.orgId); break;
-    case 'team.create': n.teams.push({ id: nextTempId--, orgId: c.orgId, name: c.name, description: c.description, enabled: true }); break;
+    case 'team.create': n.teams.push({ id: tempId, orgId: c.orgId, name: c.name, description: c.description, enabled: true }); break;
     case 'team.update': n.teams = n.teams.map((t) => (t.id === c.teamId ? { ...t, ...(c.name !== undefined && { name: c.name }), ...(c.description !== undefined && { description: c.description }), ...(c.enabled !== undefined && { enabled: c.enabled }) } : t)); break;
     case 'team.delete': dropTeams([c.teamId]); break;
-    case 'role.create': n.roles.push({ id: nextTempId--, teamId: c.teamId, databasePattern: c.databasePattern, permissions: c.permissions }); break;
+    case 'role.create': n.roles.push({ id: tempId, teamId: c.teamId, databasePattern: c.databasePattern, permissions: c.permissions }); break;
     case 'role.update': n.roles = n.roles.map((r) => (r.id === c.roleId ? { ...r, ...(c.databasePattern !== undefined && { databasePattern: c.databasePattern }), ...(c.permissions !== undefined && { permissions: c.permissions }) } : r)); break;
     case 'role.delete': n.roles = n.roles.filter((r) => r.id !== c.roleId); n.measurementPermissions = n.measurementPermissions.filter((m) => m.roleId !== c.roleId); break;
-    case 'mp.create': n.measurementPermissions.push({ id: nextTempId--, roleId: c.roleId, measurementPattern: c.measurementPattern, permissions: c.permissions }); break;
+    case 'mp.create': n.measurementPermissions.push({ id: tempId, roleId: c.roleId, measurementPattern: c.measurementPattern, permissions: c.permissions }); break;
     case 'mp.delete': n.measurementPermissions = n.measurementPermissions.filter((m) => m.id !== c.mpId); break;
     case 'membership.add': n.memberships[c.tokenId] = [...new Set([...(n.memberships[c.tokenId] ?? []), c.teamId])]; break;
-    case 'membership.remove': n.memberships[c.tokenId] = (n.memberships[c.tokenId] ?? []).filter((t) => t !== c.teamId); break;
+    case 'membership.remove': {
+      const kept = (n.memberships[c.tokenId] ?? []).filter((t) => t !== c.teamId);
+      if (kept.length) n.memberships[c.tokenId] = kept;
+      else delete n.memberships[c.tokenId];
+      break;
+    }
   }
   return n;
 }
@@ -319,11 +377,13 @@ function covers(a: Grant, b: Grant): boolean {
   return a.permissions.includes('admin') || b.permissions.every((p) => a.permissions.includes(p));
 }
 
-const grantKey = (g: Grant) => `${g.teamId}|${g.roleId}|${g.databasePattern}|${g.measurementPattern ?? '*all*'}|${[...g.permissions].sort().join(',')}`;
+const grantKey = (g: Grant) => `${g.teamId}|${g.roleId}|${g.mpId ?? '-'}|${g.databasePattern}|${g.measurementPattern ?? '*all*'}|${[...g.permissions].sort().join(',')}`;
 
 function affectedTokens(s: RbacSnapshot, c: RbacChange): number[] {
-  const teamsOf = (teamIds: number[]) =>
-    s.tokens.filter((t) => (s.memberships[t.id] ?? []).some((tid) => teamIds.includes(tid))).map((t) => t.id);
+  const teamsOf = (teamIds: number[]) => {
+    const set = new Set(teamIds);
+    return s.tokens.filter((t) => (s.memberships[t.id] ?? []).some((tid) => set.has(tid))).map((t) => t.id);
+  };
   const roleTeam = (roleId: number) => s.roles.find((r) => r.id === roleId)?.teamId;
   switch (c.kind) {
     case 'org.delete': return teamsOf(s.teams.filter((t) => t.orgId === c.orgId).map((t) => t.id));
@@ -370,7 +430,7 @@ export function previewChange(s: RbacSnapshot, c: RbacChange): ChangePreview {
     const ak = new Set(a.grants.map(grantKey));
     impacts.push({
       tokenId,
-      tokenName: s.tokens.find((t) => t.id === tokenId)?.name ?? `token ${tokenId}`,
+      tokenName: indexOf(s).tokens.get(tokenId)?.name ?? `token ${tokenId}`,
       before: b,
       after: a,
       gained: a.grants.filter((g) => !bk.has(grantKey(g))),
@@ -385,7 +445,10 @@ export function previewChange(s: RbacSnapshot, c: RbacChange): ChangePreview {
   const widensAccess = impacts.some((i) =>
     i.flags.includes('reverts_to_token_permissions') ||
     i.flags.includes('widened_to_database') ||
-    (i.before.mode === 'rbac' && i.after.mode === 'rbac' && i.gained.some((g) => !i.before.grants.some((b) => covers(b, g)))));
+    (i.before.mode === 'rbac' && i.after.mode === 'rbac' && i.gained.some((g) => !i.before.grants.some((b) => covers(b, g)))) ||
+    // A token joining RBAC with a permission it does not hold itself gains it
+    // where Arc checks RBAC alone (database listing, arc#1559).
+    (i.before.mode === 'token' && i.after.mode === 'rbac' && i.gained.some((g) => g.permissions.some((p) => !i.before.ownPermissions.includes(p)))));
   return { impacts, widensAccess, cascade: cascadeOf(s, c) };
 }
 
@@ -396,12 +459,14 @@ function cascadeOf(s: RbacSnapshot, c: RbacChange): ChangePreview['cascade'] {
   else if (c.kind === 'team.delete') teamIds = [c.teamId];
   else if (c.kind === 'role.delete') return { teams: 0, roles: 1, measurementPermissions: s.measurementPermissions.filter((m) => m.roleId === c.roleId).length, memberships: 0 };
   else return null;
-  roleIds = s.roles.filter((r) => teamIds.includes(r.teamId)).map((r) => r.id);
+  const teamSet = new Set(teamIds);
+  roleIds = s.roles.filter((r) => teamSet.has(r.teamId)).map((r) => r.id);
+  const roleSet = new Set(roleIds);
   return {
     teams: teamIds.length,
     roles: roleIds.length,
-    measurementPermissions: s.measurementPermissions.filter((m) => roleIds.includes(m.roleId)).length,
-    memberships: Object.values(s.memberships).reduce((n, ids) => n + ids.filter((t) => teamIds.includes(t)).length, 0),
+    measurementPermissions: s.measurementPermissions.filter((m) => roleSet.has(m.roleId)).length,
+    memberships: Object.values(s.memberships).reduce((n, ids) => n + ids.filter((t) => teamSet.has(t)).length, 0),
   };
 }
 
@@ -413,14 +478,44 @@ function cascadeOf(s: RbacSnapshot, c: RbacChange): ChangePreview['cascade'] {
  */
 export function previewFingerprint(s: RbacSnapshot, c: RbacChange): string {
   const p = previewChange(s, c);
-  return JSON.stringify({
+  return hash64(JSON.stringify({
     kind: c.kind,
     exists: targetExists(s, c),
-    tokens: p.impacts.map((i) => [i.tokenId, i.before.mode, i.before.grants.map(grantKey)]),
-  });
+    // What the admin read in the preview: the sentence (names), the cascade
+    // and each affected token's access.
+    text: describeChange(s, c),
+    cascade: p.cascade,
+    // Before AND after: another admin adding a role to the team a token is
+    // joining changes the result without changing the token's current access.
+    tokens: p.impacts.map((i) => [
+      i.tokenId,
+      i.before.mode,
+      i.before.ownPermissions,
+      i.before.grants.map(grantKey),
+      i.after.grants.map((g) => grantKey({ ...g, roleId: Math.max(g.roleId, 0), mpId: g.mpId === null ? null : Math.max(g.mpId, 0) })),
+    ]),
+  }));
 }
 
-function targetExists(s: RbacSnapshot, c: RbacChange): boolean {
+/**
+ * 64-bit FNV-1a as 16 hex characters: compact and identical in the browser
+ * and on the server. Not a security measure — it detects that state changed,
+ * and the only party that could craft a collision is an admin who could make
+ * the change anyway.
+ */
+export function hash64(text: string): string {
+  let h = 0xcbf29ce484222325n;
+  const prime = 0x100000001b3n;
+  const mask = 0xffffffffffffffffn;
+  for (let i = 0; i < text.length; i++) {
+    h ^= BigInt(text.charCodeAt(i));
+    h = (h * prime) & mask;
+  }
+  return h.toString(16).padStart(16, '0');
+}
+
+/** Whether what `c` acts on is in the snapshot (creates: whether the parent is). */
+export function targetExists(s: RbacSnapshot, c: RbacChange): boolean {
   switch (c.kind) {
     case 'org.update': case 'org.delete': return s.orgs.some((o) => o.id === c.orgId);
     case 'team.create': return s.orgs.some((o) => o.id === c.orgId);
@@ -429,7 +524,7 @@ function targetExists(s: RbacSnapshot, c: RbacChange): boolean {
     case 'mp.delete': return s.measurementPermissions.some((m) => m.id === c.mpId);
     case 'membership.add': return s.tokens.some((t) => t.id === c.tokenId) && s.teams.some((t) => t.id === c.teamId);
     case 'membership.remove': return (s.memberships[c.tokenId] ?? []).includes(c.teamId);
-    default: return true;
+    case 'org.create': return true;
   }
 }
 
@@ -469,7 +564,7 @@ const KIND_FIELDS: Record<RbacChange['kind'], { ids: string[]; required: string[
 export function parseChange(raw: unknown): RbacChange | null {
   const o = obj(raw);
   const kind = o?.kind;
-  if (!o || typeof kind !== 'string' || !(kind in KIND_FIELDS)) return null;
+  if (!o || typeof kind !== 'string' || !Object.hasOwn(KIND_FIELDS, kind)) return null;
   const spec = KIND_FIELDS[kind as RbacChange['kind']];
   const allowed = new Set(['kind', ...spec.ids, ...spec.required, ...spec.optional]);
   if (Object.keys(o).some((k) => !allowed.has(k))) return null;
@@ -486,8 +581,9 @@ export function parseChange(raw: unknown): RbacChange | null {
       continue;
     }
     if (f === 'permissions') {
-      if (!Array.isArray(v) || v.some((p) => typeof p !== 'string')) return null;
-      out[f] = v;
+      // Only Arc's four permissions, each once; anything else is malformed.
+      if (!Array.isArray(v) || v.length > RBAC_PERMISSIONS.length || v.some((p) => !(RBAC_PERMISSIONS as readonly unknown[]).includes(p))) return null;
+      out[f] = [...new Set(v as RbacPermission[])];
     } else if (f === 'enabled') {
       if (typeof v !== 'boolean') return null;
       out[f] = v;

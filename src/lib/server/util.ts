@@ -32,3 +32,34 @@ export function intParam(url: URL, name: string, fallback: number, min: number, 
   const n = Number(raw);
   return n >= min && n <= max ? n : null;
 }
+
+/**
+ * Read a JSON request body of at most `maxBytes`, counting bytes as they
+ * arrive so an oversized or chunked body is refused without buffering it.
+ * Null for a missing, oversized or malformed body. (A fuller shared reader
+ * for every route is proposed in PR #95.)
+ */
+export async function readSmallJson(request: Request, maxBytes: number): Promise<unknown | null> {
+  if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/json')) return null;
+  const declared = Number(request.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) return null;
+  if (!request.body) return null;
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  try {
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
+  } catch {
+    return null;
+  }
+}

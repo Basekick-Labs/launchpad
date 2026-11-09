@@ -1,7 +1,7 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { applyRbacChange, getRbacSnapshot, type RbacTarget } from './rbacAdmin';
+import { applyRbacChange, getRbacSnapshot, resetRbacCacheForTests, type RbacTarget } from './rbacAdmin';
 import { listChanges } from './instanceChangeLog';
 import { getDb } from './db';
 import { previewFingerprint, type RbacChange, type RbacSnapshot } from '../rbac';
@@ -23,6 +23,10 @@ let store: Store;
 let licensed = true;
 /** Fail the next create with a 500 after committing it (cluster read-back lag). */
 let failNextCreateAfterCommit = false;
+/** Paths that answer 500 (a failing child read). */
+let failingPaths = new Set<string>();
+/** Hold the next write this long before answering (after applying it). */
+let slowWriteMs = 0;
 let requests: Array<{ method: string; path: string; auth?: string }> = [];
 let server: http.Server;
 let base = '';
@@ -36,6 +40,7 @@ function seed(): Store {
   s.roles.set(20, { id: 20, team_id: 10, database_pattern: 'prod_*', permissions: ['read'] });
   s.tokens.set(5, { id: 5, name: 'admin', permissions: ['admin'], enabled: true });
   s.tokens.set(6, { id: 6, name: 'analyst', permissions: ['read'], enabled: true });
+  s.tokens.set(7, { id: 7, name: 'loose', permissions: ['read'], enabled: true });
   s.members.add('6:10');
   return s;
 }
@@ -73,6 +78,15 @@ function route(method: string, path: string, body: Record<string, unknown>): [nu
       s.orgs.delete(id);
       return [200, { success: true }];
     }
+  }
+  if (method === 'GET' && (r = m(/^\/api\/v1\/rbac\/organizations\/(\d+)\/teams$/))) {
+    return [200, { success: true, teams: nullIfEmpty([...s.teams.values()].filter((t) => t.organization_id === +r![1])) }];
+  }
+  if (method === 'GET' && (r = m(/^\/api\/v1\/rbac\/teams\/(\d+)\/roles$/))) {
+    return [200, { success: true, roles: nullIfEmpty([...s.roles.values()].filter((x) => x.team_id === +r![1])) }];
+  }
+  if (method === 'GET' && (r = m(/^\/api\/v1\/rbac\/roles\/(\d+)\/measurements$/))) {
+    return [200, { success: true, measurement_permissions: nullIfEmpty([...s.mps.values()].filter((p) => p.role_id === +r![1])) }];
   }
   if (method === 'POST' && (r = m(/^\/api\/v1\/rbac\/organizations\/(\d+)\/teams$/))) {
     if (!s.orgs.has(+r[1])) return [400, { success: false, error: 'organization not found' }];
@@ -144,9 +158,17 @@ beforeAll(async () => {
     req.on('data', (c) => (raw += c));
     req.on('end', () => {
       requests.push({ method: req.method ?? '', path: req.url ?? '', auth: req.headers.authorization });
-      const [status, payload] = route(req.method ?? 'GET', (req.url ?? '').split('?')[0], raw ? JSON.parse(raw) : {});
-      res.writeHead(status, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(payload));
+      const path = (req.url ?? '').split('?')[0];
+      const [status, payload] = failingPaths.has(path) ? [500, { success: false, error: 'boom' }] : route(req.method ?? 'GET', path, raw ? JSON.parse(raw) : {});
+      const send = () => {
+        res.writeHead(status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(payload));
+      };
+      if (req.method !== 'GET' && slowWriteMs) {
+        const ms = slowWriteMs;
+        slowWriteMs = 0;
+        setTimeout(send, ms);
+      } else send();
     });
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
@@ -160,9 +182,12 @@ beforeAll(async () => {
 afterAll(() => new Promise<void>((r) => server.close(() => r())));
 
 beforeEach(() => {
+  resetRbacCacheForTests();
   store = seed();
   licensed = true;
   failNextCreateAfterCommit = false;
+  failingPaths = new Set();
+  slowWriteMs = 0;
   requests = [];
   getDb().prepare('DELETE FROM instance_change_log').run();
 });
@@ -198,7 +223,7 @@ describe('applyRbacChange', () => {
   it('applies a change, returns the new tree and records who made it', async () => {
     const out = await change({ kind: 'role.create', teamId: 10, databasePattern: 'logs', permissions: ['read'] });
     expect(out.result).toBe('applied');
-    expect(out.snapshot.roles.map((r) => r.databasePattern)).toEqual(['prod_*', 'logs']);
+    expect(out.snapshot!.roles.map((r) => r.databasePattern)).toEqual(['prod_*', 'logs']);
     const log = listChanges('inst', null).changes;
     expect(log.map((c) => [c.method, c.path, c.status])).toEqual([['POST', '/api/v1/rbac/teams/10/roles', 201]]);
     expect(log[0].actor?.id).toBe('u1');
@@ -218,15 +243,10 @@ describe('applyRbacChange', () => {
     const out = await change({ kind: 'mp.create', roleId: 20, measurementPattern: 'orders', permissions: ['read'] });
     expect(out.result).toBe('applied_after_error');
     expect(store.mps.size).toBe(1); // created once, not retried
-    expect(listChanges('inst', null).changes[0]).toMatchObject({ status: 500, outcome: 'unknown' });
+    // Recorded with what was established: Arc answered 500, but it applied.
+    expect(listChanges('inst', null).changes[0]).toMatchObject({ status: 500, outcome: 'ok' });
   });
 
-  it('passes Arc\'s refusal through', async () => {
-    await expect(change({ kind: 'org.create', name: 'acme', description: '' })).rejects.toMatchObject({
-      code: 'arc_error',
-      message: "organization with name 'acme' already exists",
-    });
-  });
 
   it('rejects invalid fields before contacting Arc', async () => {
     const s = await getRbacSnapshot(target(), opts);
@@ -238,8 +258,8 @@ describe('applyRbacChange', () => {
 
   it('cascades a team delete in the returned tree', async () => {
     const out = await change({ kind: 'team.delete', teamId: 10 });
-    expect(out.snapshot.teams).toEqual([]);
-    expect(out.snapshot.memberships).toEqual({});
+    expect(out.snapshot!.teams).toEqual([]);
+    expect(out.snapshot!.memberships).toEqual({});
   });
 
   it('without a license, only allows removing a token from a team', async () => {
@@ -248,5 +268,45 @@ describe('applyRbacChange', () => {
     const out = await change({ kind: 'membership.remove', tokenId: 6, teamId: 10 });
     expect(out.result).toBe('applied');
     expect(store.members.size).toBe(0);
+  });
+});
+
+describe('review cases', () => {
+  it('fails the load when a child read fails, instead of showing a hole', async () => {
+    failingPaths.add('/api/v1/auth/tokens/6/teams');
+    await expect(getRbacSnapshot(target(), opts)).rejects.toMatchObject({ code: 'arc_error' });
+  });
+
+  it('refuses a membership add when someone added a role to that team meanwhile', async () => {
+    const seen = await getRbacSnapshot(target(), opts);
+    const c: RbacChange = { kind: 'membership.add', tokenId: 7, teamId: 10 };
+    // Another admin widens the team the token is about to join.
+    store.roles.set(99, { id: 99, team_id: 10, database_pattern: '*', permissions: ['read', 'write'] });
+    resetRbacCacheForTests();
+    await expect(applyRbacChange(target(), opts, 'u1', c, previewFingerprint(seen, c))).rejects.toMatchObject({ code: 'stale' });
+  });
+
+  it('reports a target that no longer exists rather than sending the change', async () => {
+    const seen = await getRbacSnapshot(target(), opts);
+    const c: RbacChange = { kind: 'role.delete', roleId: 20 };
+    const fp = previewFingerprint(seen, c);
+    store.roles.delete(20);
+    requests = [];
+    await expect(applyRbacChange(target(), opts, 'u1', c, fp)).rejects.toMatchObject({ code: 'not_found' });
+    expect(requests.some((r) => r.method === 'DELETE')).toBe(false);
+  });
+
+  it('settles a write that timed out by reading the tree back', async () => {
+    slowWriteMs = 12_000; // past the write deadline; the fake applies it first
+    const out = await change({ kind: 'org.create', name: 'slow', description: '' });
+    expect(out.result).toBe('applied_after_error');
+    expect(out.snapshot!.orgs.map((o) => o.name)).toContain('slow');
+  }, 30_000);
+
+  it('passes Arc\'s field refusal back next to the field', async () => {
+    await expect(change({ kind: 'org.create', name: 'acme', description: '' })).rejects.toMatchObject({
+      code: 'arc_error',
+      fields: { name: "Arc: organization with name 'acme' already exists" },
+    });
   });
 });

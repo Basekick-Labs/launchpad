@@ -9,7 +9,7 @@
   import SQLConsole from '$lib/components/SQLConsole.svelte';
   import SchemaExplorer from '$lib/components/SchemaExplorer.svelte';
   import Monitoring from '$lib/components/Monitoring.svelte';
-  import TokenManager from '$lib/components/TokenManager.svelte';
+  import TokensView from '$lib/components/access/TokensView.svelte';
   import RetentionPolicies from '$lib/components/RetentionPolicies.svelte';
   import ContinuousQueries from '$lib/components/ContinuousQueries.svelte';
   import Alerts from '$lib/components/Alerts.svelte';
@@ -19,7 +19,7 @@
   import { Button } from '$lib/components/ui/button';
   import {
     ArrowLeft, Terminal, Activity, FileText, Database,
-    Clock, BarChart3, Key, Bell, Radio, Network, ShieldCheck
+    Clock, BarChart3, Key, Bell, Radio, Network
   } from 'lucide-svelte';
 
   export let data: any;
@@ -32,7 +32,7 @@
   let loading = true;
   let error = '';
 
-  type ViewId = 'console' | 'monitoring' | 'logs' | 'retention' | 'continuous-queries' | 'alerts' | 'mqtt' | 'tokens' | 'cluster' | 'access';
+  type ViewId = 'console' | 'monitoring' | 'logs' | 'retention' | 'continuous-queries' | 'alerts' | 'mqtt' | 'tokens' | 'cluster';
   let activeView: ViewId = 'console';
   /**
    * The tab named in ?view=, kept in the URL so a reload or a shared link opens
@@ -90,15 +90,19 @@
     // Also shown when licensed but turned off, where it explains the
     // single-node state instead of disappearing.
     { id: 'cluster', label: 'Cluster', icon: Network, disabled: false, capability: 'cluster', showWhen: ['available', 'disabled'] },
-    // Unlicensed too: removing a token from a team stays possible (Arc keeps
-    // that route ungated so a lockout can be undone).
-    { id: 'access', label: 'Access', icon: ShieldCheck, disabled: false, capability: 'rbac', showWhen: ['available', 'unlicensed'] },
   ];
 
   let capabilities: CapabilitiesView | null = null;
+  // Arc RBAC is there (licensed or not; unlicensed keeps "remove from team"):
+  // the Tokens tab adds access control and is named for it. Admin-only, like
+  // the capability itself.
+  $: rbacServed = capabilityIn(capabilities, 'rbac', ['available', 'unlicensed']);
+
   // Clustering is on (not just licensed): Monitoring then points to the Cluster tab.
   $: clusterServed = capabilityIn(capabilities, 'cluster', ['available']);
-  $: visibleTabs = tabs.filter((t) => !t.capability || capabilityIn(capabilities, t.capability, t.showWhen ?? ['available']));
+  $: visibleTabs = tabs
+    .filter((t) => !t.capability || capabilityIn(capabilities, t.capability, t.showWhen ?? ['available']))
+    .map((t) => (t.id === 'tokens' && rbacServed ? { ...t, label: 'Tokens & access' } : t));
 
   onMount(async () => {
     if (!org) return;
@@ -200,14 +204,10 @@
             <svelte:component this={mod.default} orgId={org.id} {instanceId} />
           {/key}
         {/await}
-      {:else if activeView === 'access' && org}
-        {#await import('$lib/components/access/AccessView.svelte') then mod}
-          {#key instanceId}
-            <svelte:component this={mod.default} orgId={org.id} {instanceId} />
-          {/key}
-        {/await}
-      {:else if activeView === 'tokens'}
-        <TokenManager {client} arcVersion={connection?.arc_version ?? ''} />
+      {:else if activeView === 'tokens' && org}
+        {#key instanceId}
+          <TokensView {client} arcVersion={connection?.arc_version ?? ''} orgId={org.id} {instanceId} withAccess={rbacServed} />
+        {/key}
       {/if}
     {/if}
   </div>

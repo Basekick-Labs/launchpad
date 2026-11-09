@@ -2,28 +2,13 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { allowPrivateEndpoints } from '$lib/server/arcConnection';
 import { requireInstanceRole } from '$lib/server/orgAccess';
-import { applyRbacChange, getRbacSnapshot, RbacError, type RbacErrorCode } from '$lib/server/rbacAdmin';
+import { applyRbacChange, getRbacSnapshot } from '$lib/server/rbacAdmin';
+import { rbacErrorResponse } from '$lib/server/rbacResponse';
+import { readSmallJson } from '$lib/server/util';
 import { parseChange } from '$lib/rbac';
 
-const STATUS: Record<RbacErrorCode, number> = {
-  invalid: 400,
-  not_found: 404,
-  stale: 409,
-  unlicensed: 403,
-  auth_off: 409,
-  token_rejected: 502,
-  token_not_admin: 502,
-  arc_error: 502,
-  unreachable: 504,
-};
-
-function failure(err: unknown): Response {
-  if (err instanceof RbacError) {
-    return json({ error: err.code, message: err.message, fields: err.fields }, { status: STATUS[err.code] });
-  }
-  console.error('[access] unexpected error', { error: err instanceof Error ? err.message : String(err) });
-  return json({ error: 'internal', message: 'Unexpected error' }, { status: 500 });
-}
+/** A change request is a handful of fields plus a 16-character fingerprint. */
+const MAX_BODY_BYTES = 16 * 1024;
 
 /** Arc RBAC tree and token memberships (#8). Owner/admin. */
 export const GET: RequestHandler = async ({ locals, params }) => {
@@ -34,7 +19,7 @@ export const GET: RequestHandler = async ({ locals, params }) => {
       headers: { 'cache-control': 'no-store' },
     });
   } catch (err) {
-    return failure(err);
+    return rbacErrorResponse(err, access.instance.id, 'snapshot');
   }
 };
 
@@ -45,20 +30,21 @@ export const GET: RequestHandler = async ({ locals, params }) => {
 export const POST: RequestHandler = async ({ locals, params, request }) => {
   const access = requireInstanceRole(locals.user, params.org_id, params.id, 'admin');
   if (access instanceof Response) return access;
-  let body: { change?: unknown; fingerprint?: unknown };
-  try {
-    body = await request.json();
-  } catch {
-    return json({ error: 'invalid', message: 'Request body must be JSON' }, { status: 400 });
-  }
+  const body = (await readSmallJson(request, MAX_BODY_BYTES)) as { change?: unknown; fingerprint?: unknown } | null;
   const change = parseChange(body?.change);
-  if (!change || typeof body.fingerprint !== 'string' || body.fingerprint.length > 1_000_000) {
+  if (!change || typeof body?.fingerprint !== 'string' || !/^[0-9a-f]{16}$/.test(body.fingerprint)) {
     return json({ error: 'invalid', message: 'Unknown or malformed change' }, { status: 400 });
   }
   try {
-    const outcome = await applyRbacChange(access.instance, { allowPrivate: allowPrivateEndpoints() }, locals.user!.id, change, body.fingerprint);
-    return json(outcome);
+    const outcome = await applyRbacChange(
+      access.instance,
+      { allowPrivate: allowPrivateEndpoints(), signal: request.signal },
+      locals.user!.id,
+      change,
+      body.fingerprint,
+    );
+    return json(outcome, { headers: { 'cache-control': 'no-store' } });
   } catch (err) {
-    return failure(err);
+    return rbacErrorResponse(err, access.instance.id, change.kind);
   }
 };

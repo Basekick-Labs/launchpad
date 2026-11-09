@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { createEventDispatcher, onMount } from 'svelte';
   import type { ArcClient, TokenInfo, CreateTokenRequest } from '$lib/arcClient';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
@@ -28,6 +28,15 @@
 
   export let client: ArcClient;
   export let arcVersion: string = '';
+  /**
+   * When the Access view is shown alongside (Enterprise), tokens can be
+   * selected to see their teams and access. `changed` fires after any token
+   * is created, rotated, revoked, enabled or deleted, so that view reloads.
+   */
+  export let selectable = false;
+  export let selectedId: number | null = null;
+
+  const dispatch = createEventDispatcher<{ select: TokenInfo; changed: void }>();
 
   function isVersionAffected(version: string): boolean {
     if (!version) return false;
@@ -142,6 +151,7 @@
       showCreateDialog = false;
 
       await loadTokens();
+      dispatch('changed');
       toast.success('Token created successfully');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to create token';
@@ -177,6 +187,7 @@
       showRotateDialog = false;
 
       await loadTokens();
+      dispatch('changed');
       toast.success('Token rotated successfully');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to rotate token';
@@ -202,6 +213,7 @@
       showRevokeDialog = false;
 
       await loadTokens();
+      dispatch('changed');
       toast.success('Token revoked successfully');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to revoke token';
@@ -227,6 +239,7 @@
       showDeleteDialog = false;
 
       await loadTokens();
+      dispatch('changed');
       toast.success('Token deleted successfully');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to delete token';
@@ -241,6 +254,7 @@
     try {
       await client.updateToken(token.id, { enabled: true });
       await loadTokens();
+      dispatch('changed');
       toast.success('Token enabled successfully');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to enable token';
@@ -400,12 +414,22 @@
         <div class={cn(
           'rounded-lg border bg-card p-4',
           !token.enabled && 'opacity-60',
-          isExpired(token) && token.enabled && 'border-yellow-500/50'
+          isExpired(token) && token.enabled && 'border-yellow-500/50',
+          selectable && token.id === selectedId && 'border-primary ring-1 ring-primary'
         )}>
           <div class="flex items-start justify-between gap-4">
             <div class="flex-1 space-y-2">
               <div class="flex items-center gap-2 flex-wrap">
-                <span class="font-medium">{token.name}</span>
+                {#if selectable}
+                  <button
+                    type="button"
+                    class="font-medium underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    aria-pressed={token.id === selectedId}
+                    on:click={() => dispatch('select', token)}
+                  >{token.name}</button>
+                {:else}
+                  <span class="font-medium">{token.name}</span>
+                {/if}
                 {#if !token.enabled}
                   <Badge variant="destructive">Disabled</Badge>
                 {:else if isExpired(token) && !showExpiryWarning}

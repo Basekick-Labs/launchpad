@@ -17,6 +17,8 @@ export interface ChangeRecord {
   /** Arc's HTTP status; null when Arc never answered. */
   status: number | null;
   dryRun?: boolean;
+  /** Set when the caller established the outcome itself (e.g. a 5xx it verified). */
+  outcome?: ChangeOutcome;
 }
 
 /** How a status reads in the log: 2xx ok, a definite refusal error, no answer or 5xx unknown. */
@@ -65,7 +67,7 @@ function statements() {
  */
 export function recordChange(r: ChangeRecord): void {
   try {
-    statements().insert.run(r.instanceId, r.actorUserId, r.method, `/${r.path}`.slice(0, MAX_PATH), r.status, outcomeFor(r.status), r.dryRun ? 1 : 0);
+    statements().insert.run(r.instanceId, r.actorUserId, r.method, `/${r.path}`.slice(0, MAX_PATH), r.status, r.outcome ?? outcomeFor(r.status), r.dryRun ? 1 : 0);
   } catch (err) {
     console.error('[change-log] could not record change', {
       instance_id: r.instanceId,
