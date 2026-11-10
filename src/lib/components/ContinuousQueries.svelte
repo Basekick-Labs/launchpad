@@ -423,12 +423,12 @@ ORDER BY 1`;
           <p class="text-lg font-medium">Continuous Queries Not Available</p>
           <p class="mt-2 text-sm text-muted-foreground max-w-md">
             This feature is not enabled on your Arc server. To enable continuous queries,
-            add the following to your Arc configuration:
+            add the following to the instance's <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">arc.toml</code>:
           </p>
-          <pre class="mt-4 rounded-md bg-muted p-4 text-left text-xs font-mono">continuous_queries:
-  enabled: true</pre>
+          <pre class="mt-4 rounded-md bg-muted p-4 text-left text-xs font-mono">[continuous_query]
+enabled = true</pre>
           <p class="mt-4 text-xs text-muted-foreground">
-            After updating the configuration, restart the Arc server.
+            Or set <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">ARC_CONTINUOUS_QUERY_ENABLED=true</code> in Arc's environment. Then restart the Arc server.
           </p>
         </div>
         <Button variant="outline" on:click={loadQueries}>

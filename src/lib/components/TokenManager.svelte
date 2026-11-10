@@ -365,12 +365,12 @@
         <p class="text-lg font-medium">Token Management Not Available</p>
         <p class="mt-2 text-sm text-muted-foreground max-w-md">
           This feature requires authentication to be enabled on your Arc server.
-          Add the following to your Arc configuration:
+          Add the following to the instance's <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">arc.toml</code>:
         </p>
-        <pre class="mt-4 rounded-md bg-muted p-4 text-left text-xs font-mono">auth:
-  enabled: true</pre>
+        <pre class="mt-4 rounded-md bg-muted p-4 text-left text-xs font-mono">[auth]
+enabled = true</pre>
         <p class="mt-4 text-xs text-muted-foreground">
-          After updating the configuration, restart the Arc server.
+          Or set <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">ARC_AUTH_ENABLED=true</code> in Arc's environment. Then restart the Arc server.
         </p>
       </div>
       <Button variant="outline" on:click={loadTokens}>
