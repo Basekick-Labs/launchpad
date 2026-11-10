@@ -18,7 +18,9 @@ export type CapabilityId =
   | 'query_management'
   | 'audit_log'
   | 'backup'
-  | 'compaction';
+  | 'compaction'
+  | 'cq_scheduler'
+  | 'retention_scheduler';
 
 export interface CapabilityDefinition {
   id: CapabilityId;
@@ -29,7 +31,7 @@ export interface CapabilityDefinition {
    * Cheap admin-gated GET whose status says whether the area is served. Chosen
    * for a small, bounded handler: tiering/status and audit/stats scan tables,
    * so tiering/policies and audit/logs?limit=1 stand in for them. Null when
-   * the state comes from /api/v1/cluster instead.
+   * the state comes from /api/v1/cluster or /api/v1/schedulers instead.
    */
   probePath: string | null;
   minRole: OrgRole;
@@ -44,6 +46,10 @@ export const CAPABILITIES: readonly CapabilityDefinition[] = [
   { id: 'audit_log', label: 'Audit log', licenseFeature: 'audit_logging', probePath: '/api/v1/audit/logs?limit=1', minRole: 'admin' },
   { id: 'backup', label: 'Backup and restore', licenseFeature: null, probePath: '/api/v1/backup/status', minRole: 'admin' },
   { id: 'compaction', label: 'Compaction', licenseFeature: null, probePath: '/api/v1/compaction/status', minRole: 'admin' },
+  // Admin-only like the Retention and CQ tabs they explain: the proxy does not
+  // let members reach either area.
+  { id: 'cq_scheduler', label: 'CQ scheduler', licenseFeature: 'cq_scheduler', probePath: null, minRole: 'admin' },
+  { id: 'retention_scheduler', label: 'Retention scheduler', licenseFeature: 'retention_scheduler', probePath: null, minRole: 'admin' },
 ];
 
 export type CapabilityState = 'available' | 'unlicensed' | 'disabled' | 'unavailable' | 'unknown';
@@ -54,6 +60,8 @@ export type CapabilityReason =
   | 'disabled_in_config'
   | 'turned_off'
   | 'arc_auth_off'
+  | 'off_or_failed_to_start'
+  | 'failed_to_start'
   | 'not_enabled'
   | 'token_not_admin'
   | 'token_rejected'
@@ -95,6 +103,28 @@ export interface ProbeAnswer {
 /** null = the request failed (timeout, refused, oversized). */
 export type ProbeOutcome = ProbeAnswer | null;
 
+/** One scheduler from /api/v1/schedulers, validated. */
+export interface SchedulerInfo {
+  running: boolean;
+  /** Arc's reason when it reports the scheduler as not set up; null otherwise. */
+  reason: string | null;
+  /** Whether the license still includes the scheduler; null when not reported. */
+  licenseValid: boolean | null;
+  /** CQ scheduler: jobs scheduled. */
+  jobCount: number | null;
+  /** Retention scheduler: its cron expression and next run (ISO 8601). */
+  schedule: string | null;
+  nextRun: string | null;
+}
+
+export interface SchedulersInfo {
+  cq: SchedulerInfo | null;
+  retention: SchedulerInfo | null;
+}
+
+/** What a running scheduler reports, for the views that explain it. */
+export type SchedulerDetail = Pick<SchedulerInfo, 'jobCount' | 'schedule' | 'nextRun'>;
+
 export interface ClusterInfo {
   enabled: boolean;
   reason: string | null;
@@ -119,6 +149,10 @@ export interface ProbeResults {
   clusterProbe?: ProbeOutcome;
   /** Its parsed body, when it was a 2xx Arc cluster response. */
   cluster: ClusterInfo | null;
+  /** The /api/v1/schedulers answer; undefined when not probed. */
+  schedulersProbe?: ProbeOutcome;
+  /** Its parsed body, when it was a 2xx answer. */
+  schedulers: SchedulersInfo | null;
   /** Gated probe answers; an absent id was not probed (see the token fields). */
   probes: Partial<Record<CapabilityId, ProbeOutcome>>;
 }
@@ -126,6 +160,8 @@ export interface ProbeResults {
 export interface CapabilityResult {
   state: CapabilityState;
   reason: CapabilityReason;
+  /** Set for a running scheduler only. */
+  scheduler?: SchedulerDetail;
 }
 
 export interface InstanceCapabilities {
@@ -207,6 +243,43 @@ export function parseClusterInfo(value: unknown): ClusterInfo | null {
   };
 }
 
+/**
+ * Arc parses the retention schedule as a five-field cron expression
+ * (robfig/cron), so only that shape is kept. Anything else is not shown: like
+ * tier names, it ends up in Launchpad's own sentences.
+ */
+const CRON_RE = /^[0-9A-Za-z*?/,#-]{1,20}(?: [0-9A-Za-z*?/,#-]{1,20}){4}$/;
+
+/** Validate one scheduler of a /api/v1/schedulers body. */
+export function parseSchedulerInfo(value: unknown): SchedulerInfo | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  // Running or not, a scheduler Arc created reports Status(); one it did not
+  // create (unlicensed, off in config, failed to construct) is
+  // {enabled: false, reason} (internal/api/scheduler.go).
+  if (typeof v.running !== 'boolean' && v.enabled !== false) return null;
+  const nextRun = str(v.next_run);
+  const nextRunAt = nextRun ? Date.parse(nextRun) : NaN;
+  return {
+    running: v.running === true,
+    reason: v.enabled === false ? str(v.reason) : null,
+    licenseValid: typeof v.license_valid === 'boolean' ? v.license_valid : null,
+    jobCount: typeof v.job_count === 'number' && Number.isInteger(v.job_count) && v.job_count >= 0 ? v.job_count : null,
+    schedule: typeof v.schedule === 'string' && CRON_RE.test(v.schedule) ? v.schedule : null,
+    // Arc sends Go's zero time when the schedule does not parse.
+    nextRun: nextRunAt > 0 ? new Date(nextRunAt).toISOString() : null,
+  };
+}
+
+/** Validate a /api/v1/schedulers body. Null when it is not one. */
+export function parseSchedulers(value: unknown): SchedulersInfo | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  const cq = parseSchedulerInfo(v.cq_scheduler);
+  const retention = parseSchedulerInfo(v.retention_scheduler);
+  return cq || retention ? { cq, retention } : null;
+}
+
 /** Arc's license-gate wording (e.g. internal/api/tiering.go). */
 export const LICENSE_403 = /requires an enterprise license/i;
 /** auth.RequireAdmin's wording; it runs before the license gate. */
@@ -241,6 +314,35 @@ function classifyCluster(probes: ProbeResults, license: LicenseSummary | null): 
     return licenseIsLive(license) || c.licenseValid
       ? { state: 'disabled', reason: 'disabled_in_config' }
       : { state: 'unlicensed', reason: 'not_licensed' };
+  }
+  return { state: 'unknown', reason: 'error' };
+}
+
+function classifyScheduler(probes: ProbeResults, which: keyof SchedulersInfo): CapabilityResult {
+  if (!probes.schedulers) {
+    return probes.schedulersProbe === undefined ? { state: 'unknown', reason: 'error' } : classifyFailure(probes.schedulersProbe);
+  }
+  const info = probes.schedulers[which];
+  if (!info) return { state: 'unknown', reason: 'error' };
+  // A scheduler created under a license that lapsed since keeps running but
+  // skips every run (internal/scheduler/*_scheduler.go).
+  if (info.licenseValid === false) return { state: 'unlicensed', reason: 'not_licensed' };
+  if (info.running) {
+    return {
+      state: 'available',
+      reason: 'ok',
+      scheduler: { jobCount: info.jobCount, schedule: info.schedule, nextRun: info.nextRun },
+    };
+  }
+  // Created but not running: Arc logged why its Start() failed.
+  if (info.reason === null) return { state: 'disabled', reason: 'failed_to_start' };
+  // Arc's reasons: "Enterprise license required", "License tier does not
+  // include CQ|retention scheduler feature", and "... not enabled
+  // (continuous_query|retention.enabled=false)", to which releases after
+  // v26.09.3 add ", or the scheduler failed to start (see the startup log)".
+  if (/licen[cs]e/i.test(info.reason)) return { state: 'unlicensed', reason: 'not_licensed' };
+  if (/not enabled/i.test(info.reason)) {
+    return { state: 'disabled', reason: /failed to start/i.test(info.reason) ? 'off_or_failed_to_start' : 'disabled_in_config' };
   }
   return { state: 'unknown', reason: 'error' };
 }
@@ -299,10 +401,12 @@ export function deriveCapabilities(probes: ProbeResults): InstanceCapabilities {
 
   const classify = (def: CapabilityDefinition): CapabilityResult => {
     if (!probes.health) return { state: 'unknown', reason: 'unreachable' };
-    // /api/v1/cluster takes any valid token, so only a missing or rejected
-    // token leaves it unprobed; gated areas also need admin.
-    if (def.id === 'cluster') {
-      return skipped && skipped !== 'token_not_admin' ? { state: 'unknown', reason: skipped } : classifyCluster(probes, license);
+    // /api/v1/cluster and /api/v1/schedulers take any valid token, so only a
+    // missing or rejected token leaves them unprobed; gated areas also need admin.
+    if (def.probePath === null) {
+      if (skipped && skipped !== 'token_not_admin') return { state: 'unknown', reason: skipped };
+      if (def.id === 'cluster') return classifyCluster(probes, license);
+      return classifyScheduler(probes, def.id === 'cq_scheduler' ? 'cq' : 'retention');
     }
     if (skipped) return { state: 'unknown', reason: skipped };
     return classifyProbe(def, probes.probes[def.id], license, features);
@@ -418,6 +522,7 @@ export interface CapabilityView {
   label: string;
   state: CapabilityState;
   reason: CapabilityReason;
+  scheduler?: SchedulerDetail;
 }
 
 /** What the browser receives, already filtered for the caller's org role. */
@@ -484,8 +589,13 @@ export function tierLabel(tier: string | null): string | null {
  * its state is one of `states`. Unknown is never usable.
  */
 export function capabilityIn(view: CapabilitiesView | null, id: CapabilityId, states: readonly CapabilityState[]): boolean {
-  const c = view?.capabilities.find((x) => x.id === id);
+  const c = findCapability(view, id);
   return !!c && states.includes(c.state);
+}
+
+/** The caller's view of one capability; null when not loaded or not visible to the role. */
+export function findCapability(view: CapabilitiesView | null, id: CapabilityId): CapabilityView | null {
+  return view?.capabilities.find((x) => x.id === id) ?? null;
 }
 
 /** The common case of {@link capabilityIn}: the instance serves it. */
@@ -493,19 +603,82 @@ export function capabilityUsable(view: CapabilitiesView | null, id: CapabilityId
   return capabilityIn(view, id, ['available']);
 }
 
+/** A UTC minute, for times shown outside the browser's locale formatting. */
+function formatMinute(iso: string): string {
+  return `${iso.slice(0, 16).replace('T', ' ')} UTC`;
+}
+
 /** One-line explanation for a capability state, for the UI. */
-export function describeCapability(c: Pick<CapabilityView, 'state' | 'reason'>): string {
+export function describeCapability(c: Pick<CapabilityView, 'state' | 'reason' | 'scheduler'>): string {
+  if (c.scheduler) {
+    const { jobCount, nextRun } = c.scheduler;
+    if (jobCount !== null) return `Running, ${jobCount} job${jobCount === 1 ? '' : 's'}`;
+    return nextRun ? `Running, next run ${formatMinute(nextRun)}` : 'Running';
+  }
   switch (c.reason) {
     case 'ok': return 'Available';
     case 'not_licensed': return 'Not included in the license';
     case 'disabled_in_config': return 'Licensed, but turned off in Arc’s configuration';
     case 'turned_off': return 'Turned off in Arc’s configuration';
     case 'arc_auth_off': return 'Requires authentication to be enabled in Arc';
+    case 'off_or_failed_to_start': return 'Licensed, but turned off in Arc’s configuration or failed to start';
+    case 'failed_to_start': return 'Licensed, but failed to start (see Arc’s startup log)';
     case 'not_enabled': return 'Not enabled on this instance';
     case 'token_not_admin': return 'Cannot check: the stored token is not an admin token';
     case 'token_rejected': return 'Cannot check: Arc rejected the stored token';
     case 'no_token': return 'Cannot check: no admin token is stored';
     case 'unreachable': return 'Cannot check: Arc did not respond';
     case 'error': return 'Cannot check: unexpected response from Arc';
+  }
+}
+
+export interface SchedulerNotice {
+  running: boolean;
+  message: string;
+}
+
+const SCHEDULED = {
+  cq_scheduler: { name: 'The CQ scheduler', config: 'continuous_query', what: 'Continuous queries' },
+  retention_scheduler: { name: 'The retention scheduler', config: 'retention', what: 'Retention policies' },
+} as const;
+
+/**
+ * What the CQ or retention view says about its scheduler: definitions only
+ * run on their own while it runs. Null when its state is not known (not
+ * loaded, or discovery could not check), so a view says nothing rather than
+ * guess. `formatTime` renders the next run in the viewer's locale.
+ */
+export function schedulerNotice(
+  c: Pick<CapabilityView, 'id' | 'state' | 'reason' | 'scheduler'> | null,
+  formatTime: (iso: string) => string = formatMinute,
+): SchedulerNotice | null {
+  if (!c || (c.id !== 'cq_scheduler' && c.id !== 'retention_scheduler')) return null;
+  const s = SCHEDULED[c.id];
+  if (c.state === 'available') {
+    const d = c.scheduler;
+    let detail = '';
+    if (c.id === 'cq_scheduler') {
+      if (d && d.jobCount !== null) detail = `, with ${d.jobCount} active quer${d.jobCount === 1 ? 'y' : 'ies'} scheduled`;
+    } else {
+      if (d?.schedule) detail += ` on schedule ${d.schedule}`;
+      if (d?.nextRun) detail += `; next run ${formatTime(d.nextRun)}`;
+    }
+    return { running: true, message: `${s.name} is running${detail}.` };
+  }
+  const manual = `${s.what} only run when executed manually.`;
+  switch (c.reason) {
+    case 'not_licensed':
+      return { running: false, message: `${s.name} needs an Arc Enterprise license that includes it. ${manual}` };
+    case 'disabled_in_config':
+      return { running: false, message: `${s.name} is off because ${s.config}.enabled is false in Arc’s configuration. ${manual}` };
+    case 'off_or_failed_to_start':
+      return {
+        running: false,
+        message: `${s.name} is not running: ${s.config}.enabled is false in Arc’s configuration, or it failed to start (see Arc’s startup log). ${manual}`,
+      };
+    case 'failed_to_start':
+      return { running: false, message: `${s.name} failed to start (see Arc’s startup log). ${manual}` };
+    default:
+      return null;
   }
 }

@@ -3,7 +3,7 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { getConnectionInfo, getInstanceCapabilities, type ConnectionInfo } from '$lib/cloudApi';
-  import { capabilityIn, type CapabilitiesView, type CapabilityId, type CapabilityState } from '$lib/capabilities';
+  import { capabilityIn, findCapability, type CapabilitiesView, type CapabilityId, type CapabilityState } from '$lib/capabilities';
   import { roleAtLeast } from '$lib/roles';
   import { ArcClient, type QueryResult } from '$lib/arcClient';
   import SQLConsole from '$lib/components/SQLConsole.svelte';
@@ -107,6 +107,11 @@
 
   // Clustering is on (not just licensed): Monitoring then points to the Cluster tab.
   $: clusterServed = capabilityIn(capabilities, 'cluster', ['available']);
+
+  // CQs and retention policies only run on their own while Arc's scheduler
+  // for them runs; their views say whether it does.
+  $: cqScheduler = findCapability(capabilities, 'cq_scheduler');
+  $: retentionScheduler = findCapability(capabilities, 'retention_scheduler');
   $: visibleTabs = tabs
     .filter((t) => !t.capability || capabilityIn(capabilities, t.capability, t.showWhen ?? ['available']))
     .map((t) => (t.id === 'tokens' && (rbacServed || governanceServed) ? { ...t, label: 'Access' } : t));
@@ -196,9 +201,9 @@
       {:else if activeView === 'logs'}
         <LogExplorer {client} />
       {:else if activeView === 'retention'}
-        <RetentionPolicies {client} />
+        <RetentionPolicies {client} scheduler={retentionScheduler} />
       {:else if activeView === 'continuous-queries'}
-        <ContinuousQueries {client} />
+        <ContinuousQueries {client} scheduler={cqScheduler} />
       {:else if activeView === 'alerts'}
         <Alerts orgId={org?.id ?? ''} {instanceId} />
       {:else if activeView === 'mqtt'}

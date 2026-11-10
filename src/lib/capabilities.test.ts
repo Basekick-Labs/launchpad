@@ -2,10 +2,15 @@ import { describe, expect, it } from 'vitest';
 import {
   capabilityUsable,
   deriveCapabilities,
+  describeCapability,
+  findCapability,
   licenseNotices,
   normalizeVersion,
   parseClusterInfo,
   parseHealthLicense,
+  parseSchedulerInfo,
+  parseSchedulers,
+  schedulerNotice,
   tierLabel,
   viewForRole,
   type CapabilityId,
@@ -13,6 +18,7 @@ import {
   type LicenseSummary,
   type ProbeOutcome,
   type ProbeResults,
+  type SchedulersInfo,
 } from './capabilities';
 
 const ok: ProbeOutcome = { status: 200, body: '{}' };
@@ -41,6 +47,55 @@ const standalone: ClusterInfo = {
   version: null,
 };
 
+/**
+ * GET /api/v1/schedulers bodies as Arc sends them. Running shapes come from
+ * Status() in internal/scheduler/*_scheduler.go; the others from
+ * internal/api/scheduler.go on main and at v26.09.3.
+ */
+const SCHEDULERS = {
+  running: {
+    cq_scheduler: {
+      running: true, license_valid: true, job_count: 2,
+      jobs: [{ cq_id: 1, cq_name: 'cpu_1m', interval: '1m0s' }, { cq_id: 2, cq_name: 'mem_1h', interval: '1h0m0s' }],
+    },
+    retention_scheduler: { running: true, license_valid: true, schedule: '0 3 * * *', next_run: '2026-11-10T03:00:00-06:00' },
+  },
+  oss: {
+    cq_scheduler: { enabled: false, reason: 'Enterprise license required' },
+    retention_scheduler: { enabled: false, reason: 'Enterprise license required' },
+  },
+  tier: {
+    cq_scheduler: { enabled: false, reason: 'License tier does not include CQ scheduler feature' },
+    retention_scheduler: { enabled: false, reason: 'License tier does not include retention scheduler feature' },
+  },
+  offMain: {
+    cq_scheduler: {
+      enabled: false,
+      reason: 'CQ feature not enabled (continuous_query.enabled=false), or the scheduler failed to start (see the startup log)',
+    },
+    retention_scheduler: {
+      enabled: false,
+      reason: 'Retention feature not enabled (retention.enabled=false), or the scheduler failed to start (see the startup log)',
+    },
+  },
+  offV26093: {
+    cq_scheduler: { enabled: false, reason: 'CQ feature not enabled (continuous_query.enabled=false)' },
+    retention_scheduler: { enabled: false, reason: 'Retention feature not enabled (retention.enabled=false)' },
+  },
+  // Created, but Start() failed: Status() of a scheduler that is not running.
+  notStarted: {
+    cq_scheduler: { running: false, license_valid: true, job_count: 0, jobs: [] },
+    retention_scheduler: { running: false, license_valid: true, schedule: '0 3 * * *' },
+  },
+  // Started under a license that has since lapsed: running, but skipping every run.
+  lapsed: {
+    cq_scheduler: { running: true, license_valid: false, job_count: 2, jobs: [] },
+    retention_scheduler: { running: true, license_valid: false, schedule: '0 3 * * *', next_run: '2026-11-10T09:00:00Z' },
+  },
+} as const;
+
+const schedulers = (body: unknown): SchedulersInfo => parseSchedulers(JSON.parse(JSON.stringify(body)))!;
+
 function probes(overrides: Partial<ProbeResults> = {}, each: ProbeOutcome = ok): ProbeResults {
   return {
     hasToken: true,
@@ -48,6 +103,7 @@ function probes(overrides: Partial<ProbeResults> = {}, each: ProbeOutcome = ok):
     tokenPermissions: ['read', 'write', 'delete', 'admin'],
     tokenRejected: false,
     cluster: standalone,
+    schedulers: schedulers(SCHEDULERS.running),
     probes: Object.fromEntries(GATED.map((id) => [id, each])),
     ...overrides,
   };
@@ -62,6 +118,7 @@ describe('deriveCapabilities: OSS', () => {
   const oss = probes({
     health: { license: null },
     cluster: { ...standalone, reason: 'Enterprise license not configured' },
+    schedulers: schedulers(SCHEDULERS.oss),
     probes: {
       rbac: licenseDenied('rbac'),
       tiering: notFound, query_governance: notFound, query_management: notFound, audit_log: notFound,
@@ -73,6 +130,7 @@ describe('deriveCapabilities: OSS', () => {
     expect(states(oss)).toEqual({
       cluster: 'unlicensed', rbac: 'unlicensed', tiering: 'unlicensed', query_governance: 'unlicensed',
       query_management: 'unlicensed', audit_log: 'unlicensed', backup: 'available', compaction: 'available',
+      cq_scheduler: 'unlicensed', retention_scheduler: 'unlicensed',
     });
   });
 
@@ -189,8 +247,9 @@ describe('license states degrade gracefully', () => {
   const now = Date.parse('2026-11-09T12:00:00Z');
 
   it('expired after a restart: 404s become unlicensed, notice is critical', () => {
+    // Arc then creates neither scheduler, and says a license is required.
     const caps = deriveCapabilities(probes(
-      { health: { license: license({ status: 'expired', expiresAt: '2026-10-01T00:00:00Z' }) }, probes: { rbac: licenseDenied('rbac'), backup: ok, compaction: ok, tiering: notFound, query_governance: notFound, query_management: notFound, audit_log: notFound } },
+      { health: { license: license({ status: 'expired', expiresAt: '2026-10-01T00:00:00Z' }) }, schedulers: schedulers(SCHEDULERS.oss), probes: { rbac: licenseDenied('rbac'), backup: ok, compaction: ok, tiering: notFound, query_governance: notFound, query_management: notFound, audit_log: notFound } },
     ));
     expect(caps.capabilities.tiering.state).toBe('unlicensed');
     expect(licenseNotices(caps, now)).toEqual([
@@ -280,7 +339,7 @@ describe('viewForRole', () => {
     const view = viewForRole(caps, 'admin');
     expect(view.showEnterprise).toBe(true);
     expect(view.tier).toBe('enterprise');
-    expect(view.capabilities).toHaveLength(8);
+    expect(view.capabilities).toHaveLength(10);
     expect(capabilityUsable(view, 'rbac')).toBe(true);
     expect(capabilityUsable(view, 'cluster')).toBe(false);
     expect(capabilityUsable(null, 'rbac')).toBe(false);
@@ -353,7 +412,10 @@ describe('review follow-ups', () => {
   it('every capability gets a result', () => {
     const caps = deriveCapabilities(probes());
     expect(Object.keys(caps.capabilities).sort()).toEqual(
-      ['audit_log', 'backup', 'cluster', 'compaction', 'query_governance', 'query_management', 'rbac', 'tiering'],
+      [
+        'audit_log', 'backup', 'cluster', 'compaction', 'cq_scheduler', 'query_governance', 'query_management', 'rbac',
+        'retention_scheduler', 'tiering',
+      ],
     );
   });
 
@@ -362,5 +424,159 @@ describe('review follow-ups', () => {
     expect(licenseNotices(rejected)[0].message).toMatch(/rejected the stored token/);
     const none = deriveCapabilities(probes({ hasToken: false, tokenPermissions: null, cluster: null, probes: {} }));
     expect(licenseNotices(none)[0].message).toMatch(/No admin token is stored/);
+  });
+});
+
+describe('schedulers', () => {
+  const both = (body: unknown, overrides: Partial<ProbeResults> = {}) => {
+    const caps = deriveCapabilities(probes({ schedulers: schedulers(body), ...overrides }));
+    return [caps.capabilities.cq_scheduler, caps.capabilities.retention_scheduler];
+  };
+
+  it('reads the running shapes, with what each scheduler reports', () => {
+    const [cq, retention] = both(SCHEDULERS.running);
+    expect(cq).toEqual({ state: 'available', reason: 'ok', scheduler: { jobCount: 2, schedule: null, nextRun: null } });
+    expect(retention).toEqual({
+      state: 'available',
+      reason: 'ok',
+      scheduler: { jobCount: null, schedule: '0 3 * * *', nextRun: '2026-11-10T09:00:00.000Z' },
+    });
+  });
+
+  it('reads "Enterprise license required" (OSS, or a license that is not valid) as unlicensed', () => {
+    expect(both(SCHEDULERS.oss)).toEqual([
+      { state: 'unlicensed', reason: 'not_licensed' },
+      { state: 'unlicensed', reason: 'not_licensed' },
+    ]);
+  });
+
+  it('reads a tier without the scheduler feature as unlicensed', () => {
+    expect(both(SCHEDULERS.tier).map((c) => c.state)).toEqual(['unlicensed', 'unlicensed']);
+  });
+
+  it('reads the main wording as off in config or failed to start', () => {
+    expect(both(SCHEDULERS.offMain)).toEqual([
+      { state: 'disabled', reason: 'off_or_failed_to_start' },
+      { state: 'disabled', reason: 'off_or_failed_to_start' },
+    ]);
+  });
+
+  it('reads the v26.09.3 wording as off in config', () => {
+    expect(both(SCHEDULERS.offV26093)).toEqual([
+      { state: 'disabled', reason: 'disabled_in_config' },
+      { state: 'disabled', reason: 'disabled_in_config' },
+    ]);
+  });
+
+  it('reads a created scheduler that is not running as failed to start', () => {
+    expect(both(SCHEDULERS.notStarted)).toEqual([
+      { state: 'disabled', reason: 'failed_to_start' },
+      { state: 'disabled', reason: 'failed_to_start' },
+    ]);
+  });
+
+  it('reads a running scheduler whose license lapsed as unlicensed: it skips every run', () => {
+    expect(both(SCHEDULERS.lapsed).map((c) => c.state)).toEqual(['unlicensed', 'unlicensed']);
+  });
+
+  it('keeps an unrecognized reason or a missing scheduler unknown', () => {
+    const [cq, retention] = both({ cq_scheduler: { enabled: false, reason: 'something new' } });
+    expect(cq).toEqual({ state: 'unknown', reason: 'error' });
+    expect(retention).toEqual({ state: 'unknown', reason: 'error' });
+  });
+
+  it('gives the schedulers probe failure its own reason', () => {
+    const cq = (p: Partial<ProbeResults>) => deriveCapabilities(probes({ schedulers: null, ...p })).capabilities.cq_scheduler;
+    expect(cq({ schedulersProbe: null })).toEqual({ state: 'unknown', reason: 'unreachable' });
+    expect(cq({ schedulersProbe: { status: 404, body: '' } })).toEqual({ state: 'unknown', reason: 'error' });
+    expect(cq({ schedulersProbe: { status: 200, body: 'not json' } })).toEqual({ state: 'unknown', reason: 'error' });
+    expect(cq({})).toEqual({ state: 'unknown', reason: 'error' });
+  });
+
+  it('still reads them with a non-admin token: the route takes any token', () => {
+    const caps = deriveCapabilities(probes({ tokenPermissions: ['read'] }, adminDenied));
+    expect(caps.capabilities.cq_scheduler.state).toBe('available');
+    expect(caps.capabilities.rbac.reason).toBe('token_not_admin');
+  });
+
+  it('cannot read them without a token Arc accepts', () => {
+    expect(both(SCHEDULERS.running, { tokenRejected: true }).map((c) => c.reason)).toEqual(['token_rejected', 'token_rejected']);
+    expect(both(SCHEDULERS.running, { hasToken: false }).map((c) => c.reason)).toEqual(['no_token', 'no_token']);
+  });
+
+  it('a running scheduler shows the Enterprise section: it needs a valid license', () => {
+    const caps = deriveCapabilities(probes({ health: { license: null }, probes: {} }, notFound));
+    expect(viewForRole(caps, 'owner').showEnterprise).toBe(true);
+  });
+
+  it('parses only scheduler-shaped bodies', () => {
+    expect(parseSchedulers(null)).toBeNull();
+    expect(parseSchedulers([])).toBeNull();
+    expect(parseSchedulers({ error: 'Cannot GET /api/v1/schedulers' })).toBeNull();
+    expect(parseSchedulerInfo({ running: 'yes' })).toBeNull();
+    expect(parseSchedulerInfo({ enabled: true })).toBeNull();
+  });
+
+  it('drops values it would not show as they are', () => {
+    expect(parseSchedulerInfo({
+      running: true, job_count: -1, schedule: 'Renew your license at example.com today', next_run: '0001-01-01T00:00:00Z',
+    })).toMatchObject({ jobCount: null, schedule: null, nextRun: null });
+    expect(parseSchedulerInfo({ running: true, job_count: 1.5, schedule: '0 3 * * * *', next_run: 'soon' }))
+      .toMatchObject({ jobCount: null, schedule: null, nextRun: null });
+    expect(parseSchedulerInfo({ running: true, schedule: '*/15 1-5 * JAN MON-FRI' })).toMatchObject({ schedule: '*/15 1-5 * JAN MON-FRI' });
+    // A reason only comes with the not-created shape.
+    expect(parseSchedulerInfo({ running: false, reason: 'x' })).toMatchObject({ reason: null });
+  });
+
+  it('describes a running scheduler by what it reports', () => {
+    const view = viewForRole(deriveCapabilities(probes()), 'admin');
+    expect(describeCapability(findCapability(view, 'cq_scheduler')!)).toBe('Running, 2 jobs');
+    expect(describeCapability(findCapability(view, 'retention_scheduler')!)).toBe('Running, next run 2026-11-10 09:00 UTC');
+    expect(describeCapability({ state: 'available', reason: 'ok', scheduler: { jobCount: 1, schedule: null, nextRun: null } }))
+      .toBe('Running, 1 job');
+    expect(describeCapability({ state: 'disabled', reason: 'off_or_failed_to_start' })).toMatch(/failed to start/);
+  });
+
+  it('finds a capability only when the role can see it', () => {
+    const caps = deriveCapabilities(probes());
+    expect(findCapability(viewForRole(caps, 'admin'), 'cq_scheduler')?.state).toBe('available');
+    expect(findCapability(viewForRole(caps, 'member'), 'cq_scheduler')).toBeNull();
+    expect(findCapability(null, 'cq_scheduler')).toBeNull();
+  });
+});
+
+describe('schedulerNotice', () => {
+  const notice = (body: unknown, id: 'cq_scheduler' | 'retention_scheduler') =>
+    schedulerNotice(findCapability(viewForRole(deriveCapabilities(probes({ schedulers: schedulers(body) })), 'admin'), id));
+
+  it('says the scheduler runs, with its jobs or its next run', () => {
+    expect(notice(SCHEDULERS.running, 'cq_scheduler')).toEqual({
+      running: true, message: 'The CQ scheduler is running, with 2 active queries scheduled.',
+    });
+    expect(notice(SCHEDULERS.running, 'retention_scheduler')).toEqual({
+      running: true, message: 'The retention scheduler is running on schedule 0 3 * * *; next run 2026-11-10 09:00 UTC.',
+    });
+    const c = findCapability(viewForRole(deriveCapabilities(probes()), 'admin'), 'retention_scheduler');
+    expect(schedulerNotice(c, () => 'local time')?.message).toMatch(/next run local time\.$/);
+  });
+
+  it('explains each reason it is not running, and that runs are then manual only', () => {
+    expect(notice(SCHEDULERS.oss, 'cq_scheduler')?.message).toBe(
+      'The CQ scheduler needs an Arc Enterprise license that includes it. Continuous queries only run when executed manually.',
+    );
+    expect(notice(SCHEDULERS.offV26093, 'retention_scheduler')?.message).toBe(
+      'The retention scheduler is off because retention.enabled is false in Arc’s configuration. Retention policies only run when executed manually.',
+    );
+    expect(notice(SCHEDULERS.offMain, 'cq_scheduler')?.message).toMatch(/continuous_query\.enabled is false .* or it failed to start/);
+    expect(notice(SCHEDULERS.notStarted, 'retention_scheduler')?.message).toMatch(/^The retention scheduler failed to start/);
+    for (const body of [SCHEDULERS.oss, SCHEDULERS.tier, SCHEDULERS.offMain, SCHEDULERS.offV26093, SCHEDULERS.notStarted, SCHEDULERS.lapsed]) {
+      expect(notice(body, 'cq_scheduler')).toMatchObject({ running: false, message: expect.stringMatching(/executed manually\.$/) });
+    }
+  });
+
+  it('says nothing when the state is not known', () => {
+    expect(schedulerNotice(null)).toBeNull();
+    expect(schedulerNotice({ id: 'cq_scheduler', state: 'unknown', reason: 'unreachable' })).toBeNull();
+    expect(schedulerNotice({ id: 'rbac', state: 'available', reason: 'ok' })).toBeNull();
   });
 });

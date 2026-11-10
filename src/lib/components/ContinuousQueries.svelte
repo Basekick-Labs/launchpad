@@ -28,8 +28,12 @@
   } from 'lucide-svelte';
   import PolicyExecutionHistory from './PolicyExecutionHistory.svelte';
   import IntervalInput from './IntervalInput.svelte';
+  import SchedulerStatus from './SchedulerStatus.svelte';
+  import type { CapabilityView } from '$lib/capabilities';
 
   export let client: ArcClient;
+  /** Arc's CQ scheduler, from capability discovery: CQs only run on their interval while it runs. */
+  export let scheduler: CapabilityView | null = null;
 
   let queries: ContinuousQuery[] = [];
   let isLoading = true;
@@ -412,6 +416,9 @@ ORDER BY 1`;
 
   <!-- Content -->
   <div class="flex-1 overflow-auto p-6">
+    {#if !isLoading && !isFeatureDisabled && !error}
+      <SchedulerStatus {scheduler} />
+    {/if}
     {#if isLoading}
       <div class="flex items-center justify-center py-12">
         <Loader2 class="h-8 w-8 animate-spin text-muted-foreground" />
