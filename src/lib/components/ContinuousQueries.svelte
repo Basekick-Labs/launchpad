@@ -423,12 +423,14 @@ ORDER BY 1`;
           <p class="text-lg font-medium">Continuous Queries Not Available</p>
           <p class="mt-2 text-sm text-muted-foreground max-w-md">
             This feature is not enabled on your Arc server. To enable continuous queries,
-            add the following to the instance's <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">arc.toml</code>:
+            set <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">enabled = true</code> in the <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">[continuous_query]</code> section of the instance's <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">arc.toml</code>:
           </p>
           <pre class="mt-4 rounded-md bg-muted p-4 text-left text-xs font-mono">[continuous_query]
 enabled = true</pre>
           <p class="mt-4 text-xs text-muted-foreground">
-            Or set <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">ARC_CONTINUOUS_QUERY_ENABLED=true</code> in Arc's environment. Then restart the Arc server.
+            The arc.toml Arc ships already has a <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">[continuous_query]</code> section: change its <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">enabled</code> line
+            rather than adding a second <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">[continuous_query]</code>, which stops Arc from starting.
+            Or set <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">ARC_CONTINUOUS_QUERY_ENABLED=true</code> in Arc's environment, which overrides arc.toml. Then restart the Arc server.
           </p>
         </div>
         <Button variant="outline" on:click={loadQueries}>
