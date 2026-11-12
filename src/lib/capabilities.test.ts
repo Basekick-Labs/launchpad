@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  accessProblem,
   capabilityUsable,
+  CAPABILITIES,
   deriveCapabilities,
   describeCapability,
+  enterpriseCapabilities,
   findCapability,
   licenseNotices,
   normalizeVersion,
@@ -29,7 +32,10 @@ const licenseDenied = (feature: string): ProbeOutcome => ({
 });
 const adminDenied: ProbeOutcome = { status: 403, body: '{"error":"Permission denied: admin required","success":false}' };
 
-const GATED: CapabilityId[] = ['rbac', 'tiering', 'query_governance', 'query_management', 'audit_log', 'backup', 'compaction'];
+const GATED: CapabilityId[] = [
+  'rbac', 'tiering', 'query_governance', 'query_management', 'audit_log', 'backup', 'compaction',
+  'retention', 'continuous_queries', 'tokens',
+];
 
 function license(overrides: Partial<LicenseSummary> = {}): LicenseSummary {
   return {
@@ -139,6 +145,8 @@ describe('deriveCapabilities: OSS', () => {
       rbac: licenseDenied('rbac'),
       tiering: notFound, query_governance: notFound, query_management: notFound, audit_log: notFound,
       backup: ok, compaction: ok,
+      // Arc's defaults: retention, continuous queries and auth on.
+      retention: ok, continuous_queries: ok, tokens: ok,
     },
   });
 
@@ -147,6 +155,7 @@ describe('deriveCapabilities: OSS', () => {
       cluster: 'unlicensed', rbac: 'unlicensed', tiering: 'unlicensed', query_governance: 'unlicensed',
       query_management: 'unlicensed', audit_log: 'unlicensed', backup: 'available', compaction: 'available',
       cq_scheduler: 'unlicensed', retention_scheduler: 'unlicensed',
+      retention: 'available', continuous_queries: 'available', tokens: 'available',
     });
   });
 
@@ -355,7 +364,7 @@ describe('viewForRole', () => {
     const view = viewForRole(caps, 'admin');
     expect(view.showEnterprise).toBe(true);
     expect(view.tier).toBe('enterprise');
-    expect(view.capabilities).toHaveLength(10);
+    expect(view.capabilities).toHaveLength(CAPABILITIES.length);
     expect(capabilityUsable(view, 'rbac')).toBe(true);
     expect(capabilityUsable(view, 'cluster')).toBe(false);
     expect(capabilityUsable(null, 'rbac')).toBe(false);
@@ -429,8 +438,8 @@ describe('review follow-ups', () => {
     const caps = deriveCapabilities(probes());
     expect(Object.keys(caps.capabilities).sort()).toEqual(
       [
-        'audit_log', 'backup', 'cluster', 'compaction', 'cq_scheduler', 'query_governance', 'query_management', 'rbac',
-        'retention_scheduler', 'tiering',
+        'audit_log', 'backup', 'cluster', 'compaction', 'continuous_queries', 'cq_scheduler', 'query_governance',
+        'query_management', 'rbac', 'retention', 'retention_scheduler', 'tiering', 'tokens',
       ],
     );
   });
@@ -659,5 +668,93 @@ describe('schedulerNotice', () => {
     expect(schedulerNotice(null)).toBeNull();
     expect(schedulerNotice({ id: 'cq_scheduler', state: 'unknown', reason: 'unreachable' })).toBeNull();
     expect(schedulerNotice({ id: 'rbac', state: 'available', reason: 'ok' })).toBeNull();
+  });
+});
+
+describe('console views (#100)', () => {
+  const caps = (overrides: Partial<ProbeResults> = {}, each: ProbeOutcome = ok) =>
+    viewForRole(deriveCapabilities(probes(overrides, each)), 'admin');
+  const VIEWS = ['retention', 'continuous_queries', 'tokens'] as const;
+
+  it('reads a retention or CQ 404 as turned off in config, licensed or not', () => {
+    for (const lic of [null, license()]) {
+      const view = caps({
+        health: { license: lic },
+        probes: { ...probes().probes, retention: notFound, continuous_queries: notFound },
+      });
+      expect(findCapability(view, 'retention')).toMatchObject({ state: 'disabled', reason: 'turned_off' });
+      expect(findCapability(view, 'continuous_queries')).toMatchObject({ state: 'disabled', reason: 'turned_off' });
+    }
+  });
+
+  it('reads a token-route 404 as Arc running without auth', () => {
+    // Arc registers /api/v1/auth/* only when auth is on, verify included, so
+    // the token's permissions are unknown and every probe is sent.
+    const view = caps({ tokenPermissions: null, probes: { ...probes().probes, rbac: notFound, tokens: notFound } });
+    expect(findCapability(view, 'tokens')).toMatchObject({ state: 'disabled', reason: 'arc_auth_off' });
+    expect(describeCapability(findCapability(view, 'tokens')!)).toBe('Requires authentication to be enabled in Arc');
+  });
+
+  it('marks all three available when Arc serves them', () => {
+    const view = caps();
+    for (const id of VIEWS) expect(capabilityUsable(view, id)).toBe(true);
+  });
+
+  it('says the stored token is the problem, not the feature, when it is not admin', () => {
+    const view = caps({ tokenPermissions: ['read', 'write'] }, adminDenied);
+    for (const id of VIEWS) {
+      const c = findCapability(view, id)!;
+      expect(c).toMatchObject({ state: 'unknown', reason: 'token_not_admin' });
+      expect(accessProblem(c)).toMatch(/not an admin token/);
+    }
+  });
+
+  it('explains a rejected or missing token and an unreachable Arc', () => {
+    const rejected = caps({ tokenRejected: true, cluster: null });
+    expect(accessProblem(findCapability(rejected, 'retention'))).toMatch(/rejected the token/);
+    const none = caps({ hasToken: false, tokenPermissions: null, cluster: null, probes: {} });
+    expect(accessProblem(findCapability(none, 'continuous_queries'))).toMatch(/No Arc token is stored/);
+    const down = caps({ health: null });
+    expect(accessProblem(findCapability(down, 'tokens'))).toMatch(/did not respond/);
+    // One probe failing on its own reads the same way.
+    expect(accessProblem(findCapability(caps({ probes: { ...probes().probes, retention: null } }), 'retention'))).toMatch(
+      /did not respond/,
+    );
+  });
+
+  it('leaves the error the view got when discovery cannot explain it', () => {
+    expect(accessProblem(null)).toBeNull();
+    expect(accessProblem({ state: 'available', reason: 'ok' })).toBeNull();
+    // Off in config: each view explains its own configuration instead.
+    expect(accessProblem({ state: 'disabled', reason: 'turned_off' })).toBeNull();
+    expect(accessProblem({ state: 'disabled', reason: 'arc_auth_off' })).toBeNull();
+    const unexpected = caps({ probes: { ...probes().probes, retention: { status: 500, body: 'boom' } } });
+    expect(findCapability(unexpected, 'retention')).toMatchObject({ state: 'unknown', reason: 'error' });
+    expect(accessProblem(findCapability(unexpected, 'retention'))).toBeNull();
+  });
+
+  it('keeps them out of the Enterprise card and out of the Enterprise decision', () => {
+    const view = caps();
+    const listed = enterpriseCapabilities(view).map((c) => c.id);
+    for (const id of VIEWS) expect(listed).not.toContain(id);
+    expect(listed).toContain('cq_scheduler');
+    expect(listed).toHaveLength(CAPABILITIES.length - VIEWS.length);
+    expect(enterpriseCapabilities(null)).toEqual([]);
+    // OSS Arc serving all three still has a clean, Enterprise-free UI.
+    const oss = viewForRole(deriveCapabilities(probes({
+      health: { license: null },
+      cluster: { ...standalone, reason: 'Enterprise license not configured' },
+      schedulers: schedulers(SCHEDULERS.oss),
+      probes: {
+        ...Object.fromEntries(GATED.map((id) => [id, notFound])),
+        rbac: licenseDenied('rbac'), backup: ok, compaction: ok, retention: ok, continuous_queries: ok, tokens: ok,
+      },
+    })), 'owner');
+    expect(oss.showEnterprise).toBe(false);
+  });
+
+  it('gives members none of them: the proxy keeps members out of all three areas', () => {
+    const member = viewForRole(deriveCapabilities(probes()), 'member');
+    for (const id of VIEWS) expect(findCapability(member, id)).toBeNull();
   });
 });

@@ -39,6 +39,9 @@ function enterpriseRoutes(): Record<string, Route> {
     '/api/v1/audit/logs?limit=1': json(404, { error: 'Cannot GET' }),
     '/api/v1/backup/status': json(200, { status: 'idle' }),
     '/api/v1/compaction/status': json(200, { manager: {} }),
+    '/api/v1/retention': json(200, []),
+    '/api/v1/continuous_queries': json(404, { error: 'Cannot GET /api/v1/continuous_queries' }),
+    '/api/v1/auth/tokens': json(200, { success: true, tokens: [], count: 0 }),
   };
 }
 
@@ -103,6 +106,9 @@ describe('discoverCapabilities', () => {
       state: 'available', reason: 'ok', scheduler: { jobCount: 1, schedule: null, nextRun: null, canRun: null, nodeRole: null },
     });
     expect(caps.capabilities.retention_scheduler).toEqual({ state: 'disabled', reason: 'off_or_failed_to_start' });
+    expect(caps.capabilities.retention).toEqual({ state: 'available', reason: 'ok' });
+    expect(caps.capabilities.continuous_queries).toEqual({ state: 'disabled', reason: 'turned_off' });
+    expect(caps.capabilities.tokens).toEqual({ state: 'available', reason: 'ok' });
     const row = getDb().prepare('SELECT detected_arc_version FROM instances WHERE id = ?').get(t.id) as { detected_arc_version: string };
     expect(row.detected_arc_version).toBe('27.01.1');
   });

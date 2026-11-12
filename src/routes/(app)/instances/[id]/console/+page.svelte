@@ -112,19 +112,33 @@
   // for them runs; their views say whether it does.
   $: cqScheduler = findCapability(capabilities, 'cq_scheduler');
   $: retentionScheduler = findCapability(capabilities, 'retention_scheduler');
+  // Why the Retention, Continuous Queries or Tokens view could not load:
+  // turned off in Arc, or the stored token cannot reach the area.
+  $: retentionCapability = findCapability(capabilities, 'retention');
+  $: cqCapability = findCapability(capabilities, 'continuous_queries');
+  $: tokensCapability = findCapability(capabilities, 'tokens');
   $: visibleTabs = tabs
     .filter((t) => !t.capability || capabilityIn(capabilities, t.capability, t.showWhen ?? ['available']))
     .map((t) => (t.id === 'tokens' && (rbacServed || governanceServed) ? { ...t, label: 'Access' } : t));
 
+  let capabilitiesRequest = 0;
+
+  /**
+   * Load what the instance serves. Only when the role could see a capability
+   * (they are admin-only today); never blocks the console. `refresh` re-probes
+   * Arc, for a view whose "Check again" may follow a configuration change.
+   */
+  function loadCapabilities(refresh = false) {
+    if (!org || !roleAtLeast(data.currentRole ?? '', 'admin')) return;
+    const request = ++capabilitiesRequest;
+    getInstanceCapabilities(org.id, instanceId, { refresh })
+      .then((view) => { if (request === capabilitiesRequest) capabilities = view; })
+      .catch(() => { /* capability tabs stay hidden; views show their own errors */ });
+  }
+
   onMount(async () => {
     if (!org) return;
-    // Only probe when some tab depends on it and the role could see one
-    // (capabilities are admin-only today); never block the console on it.
-    if (tabs.some((t) => t.capability) && roleAtLeast(data.currentRole ?? '', 'admin')) {
-      getInstanceCapabilities(org.id, instanceId)
-        .then((view) => { capabilities = view; })
-        .catch(() => { /* capability tabs stay hidden */ });
-    }
+    loadCapabilities();
     try {
       connection = await getConnectionInfo(org!.id, instanceId);
       // Use server-side proxy — it auto-injects admin auth, no client-side token needed
@@ -201,9 +215,21 @@
       {:else if activeView === 'logs'}
         <LogExplorer {client} />
       {:else if activeView === 'retention'}
-        <RetentionPolicies {client} scheduler={retentionScheduler} />
+        <RetentionPolicies
+          {client}
+          currentRole={data.currentRole ?? 'viewer'}
+          capability={retentionCapability}
+          scheduler={retentionScheduler}
+          on:recheck={() => loadCapabilities(true)}
+        />
       {:else if activeView === 'continuous-queries'}
-        <ContinuousQueries {client} scheduler={cqScheduler} />
+        <ContinuousQueries
+          {client}
+          currentRole={data.currentRole ?? 'viewer'}
+          capability={cqCapability}
+          scheduler={cqScheduler}
+          on:recheck={() => loadCapabilities(true)}
+        />
       {:else if activeView === 'alerts'}
         <Alerts orgId={org?.id ?? ''} {instanceId} />
       {:else if activeView === 'mqtt'}
@@ -218,7 +244,17 @@
         {/await}
       {:else if activeView === 'tokens' && org}
         {#key instanceId}
-          <TokensView {client} arcVersion={connection?.arc_version ?? ''} orgId={org.id} {instanceId} withAccess={rbacServed} withLimits={governanceServed} />
+          <TokensView
+            {client}
+            arcVersion={connection?.arc_version ?? ''}
+            orgId={org.id}
+            {instanceId}
+            currentRole={data.currentRole ?? 'viewer'}
+            capability={tokensCapability}
+            withAccess={rbacServed}
+            withLimits={governanceServed}
+            on:recheck={() => loadCapabilities(true)}
+          />
         {/key}
       {/if}
     {/if}
