@@ -60,6 +60,21 @@ const SCHEDULERS = {
     },
     retention_scheduler: { running: true, license_valid: true, schedule: '0 3 * * *', next_run: '2026-11-10T03:00:00-06:00' },
   },
+  // A cluster reader on Arc main (arcq-reader1, 2026-11-12): both schedulers
+  // run, the primary writer's gate makes them skip every tick.
+  clusterReader: {
+    cq_scheduler: { job_count: 0, license_valid: true, running: true },
+    retention_scheduler: {
+      can_run: false, gate_role: 'reader', license_valid: true, next_run: '2026-11-13T03:00:00Z', running: true, schedule: '0 3 * * *',
+    },
+  },
+  // The primary writer of the same cluster.
+  clusterWriter: {
+    cq_scheduler: { job_count: 0, license_valid: true, running: true },
+    retention_scheduler: {
+      can_run: true, gate_role: 'writer', license_valid: true, next_run: '2026-11-13T03:00:00Z', running: true, schedule: '0 3 * * *',
+    },
+  },
   oss: {
     cq_scheduler: { enabled: false, reason: 'Enterprise license required' },
     retention_scheduler: { enabled: false, reason: 'Enterprise license required' },
@@ -435,12 +450,29 @@ describe('schedulers', () => {
 
   it('reads the running shapes, with what each scheduler reports', () => {
     const [cq, retention] = both(SCHEDULERS.running);
-    expect(cq).toEqual({ state: 'available', reason: 'ok', scheduler: { jobCount: 2, schedule: null, nextRun: null } });
+    expect(cq).toEqual({
+      state: 'available', reason: 'ok', scheduler: { jobCount: 2, schedule: null, nextRun: null, canRun: null, nodeRole: null },
+    });
     expect(retention).toEqual({
       state: 'available',
       reason: 'ok',
-      scheduler: { jobCount: null, schedule: '0 3 * * *', nextRun: '2026-11-10T09:00:00.000Z' },
+      scheduler: { jobCount: null, schedule: '0 3 * * *', nextRun: '2026-11-10T09:00:00.000Z', canRun: null, nodeRole: null },
     });
+  });
+
+  it('reads a cluster node that is not the primary writer, for both schedulers', () => {
+    const [cq, retention] = both(SCHEDULERS.clusterReader);
+    expect(cq).toMatchObject({ state: 'available', scheduler: { jobCount: 0, canRun: false, nodeRole: 'reader' } });
+    expect(retention).toMatchObject({ state: 'available', scheduler: { canRun: false, nodeRole: 'reader' } });
+    const [wcq, wret] = both(SCHEDULERS.clusterWriter);
+    expect(wcq).toMatchObject({ scheduler: { canRun: true, nodeRole: 'writer' } });
+    expect(wret).toMatchObject({ scheduler: { canRun: true, nodeRole: 'writer' } });
+    // A role that is not an identifier is not shown; the gate still is.
+    const odd = parseSchedulerInfo({ running: true, can_run: false, gate_role: '<b>x</b>' });
+    expect(odd).toMatchObject({ canRun: false, nodeRole: null });
+    // Without a running retention scheduler there is nothing to infer the CQ gate from.
+    const alone = parseSchedulers({ cq_scheduler: { running: true, job_count: 1 }, retention_scheduler: { enabled: false, reason: 'x' } });
+    expect(alone?.cq).toMatchObject({ canRun: null, nodeRole: null });
   });
 
   it('reads "Enterprise license required" (OSS, or a license that is not valid) as unlicensed', () => {
@@ -532,8 +564,12 @@ describe('schedulers', () => {
     const view = viewForRole(deriveCapabilities(probes()), 'admin');
     expect(describeCapability(findCapability(view, 'cq_scheduler')!)).toBe('Running, 2 jobs');
     expect(describeCapability(findCapability(view, 'retention_scheduler')!)).toBe('Running, next run 2026-11-10 09:00 UTC');
-    expect(describeCapability({ state: 'available', reason: 'ok', scheduler: { jobCount: 1, schedule: null, nextRun: null } }))
-      .toBe('Running, 1 job');
+    expect(describeCapability({
+      state: 'available', reason: 'ok', scheduler: { jobCount: 1, schedule: null, nextRun: null, canRun: null, nodeRole: null },
+    })).toBe('Running, 1 job');
+    const reader = viewForRole(deriveCapabilities(probes({ schedulers: schedulers(SCHEDULERS.clusterReader) })), 'admin');
+    expect(describeCapability(findCapability(reader, 'cq_scheduler')!)).toBe('Runs on the primary writer, not on this node (reader)');
+    expect(describeCapability(findCapability(reader, 'retention_scheduler')!)).toBe('Runs on the primary writer, not on this node (reader)');
     expect(describeCapability({ state: 'disabled', reason: 'off_or_failed_to_start' })).toMatch(/failed to start/);
   });
 
@@ -556,8 +592,19 @@ describe('schedulerNotice', () => {
     expect(notice(SCHEDULERS.running, 'retention_scheduler')).toEqual({
       running: true, message: 'The retention scheduler is running on schedule 0 3 * * *; next run 2026-11-10 09:00 UTC.',
     });
+    expect(notice(SCHEDULERS.clusterWriter, 'cq_scheduler')?.message).toBe('The CQ scheduler is running, with 0 active queries scheduled.');
     const c = findCapability(viewForRole(deriveCapabilities(probes()), 'admin'), 'retention_scheduler');
     expect(schedulerNotice(c, () => 'local time')?.message).toMatch(/next run local time\.$/);
+  });
+
+  it('says a node that is not the primary writer leaves the runs to it', () => {
+    expect(notice(SCHEDULERS.clusterReader, 'cq_scheduler')).toEqual({
+      running: true,
+      message: 'The CQ scheduler runs on the cluster’s primary writer; this node (reader) skips it. Continuous queries run there, not here.',
+    });
+    expect(notice(SCHEDULERS.clusterReader, 'retention_scheduler')?.message).toBe(
+      'The retention scheduler runs on the cluster’s primary writer; this node (reader) skips it. Retention policies run there, not here.',
+    );
   });
 
   it('explains each reason it is not running, and that runs are then manual only', () => {

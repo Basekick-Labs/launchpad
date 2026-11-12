@@ -100,7 +100,7 @@ describe('discoverCapabilities', () => {
     expect(caps.capabilities.tiering).toEqual({ state: 'disabled', reason: 'disabled_in_config' });
     expect(caps.capabilities.audit_log).toEqual({ state: 'unlicensed', reason: 'not_licensed' });
     expect(caps.capabilities.cq_scheduler).toEqual({
-      state: 'available', reason: 'ok', scheduler: { jobCount: 1, schedule: null, nextRun: null },
+      state: 'available', reason: 'ok', scheduler: { jobCount: 1, schedule: null, nextRun: null, canRun: null, nodeRole: null },
     });
     expect(caps.capabilities.retention_scheduler).toEqual({ state: 'disabled', reason: 'off_or_failed_to_start' });
     const row = getDb().prepare('SELECT detected_arc_version FROM instances WHERE id = ?').get(t.id) as { detected_arc_version: string };

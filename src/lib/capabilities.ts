@@ -115,6 +115,14 @@ export interface SchedulerInfo {
   /** Retention scheduler: its cron expression and next run (ISO 8601). */
   schedule: string | null;
   nextRun: string | null;
+  /**
+   * False on a cluster node that is not the primary writer: its scheduler runs
+   * but skips every tick, and the primary writer runs the jobs. Null when Arc
+   * does not say (standalone, or a CQ scheduler with no retention to infer from).
+   */
+  canRun: boolean | null;
+  /** That node's cluster role (reader, compactor, writer), when Arc reports it. */
+  nodeRole: string | null;
 }
 
 export interface SchedulersInfo {
@@ -123,7 +131,7 @@ export interface SchedulersInfo {
 }
 
 /** What a running scheduler reports, for the views that explain it. */
-export type SchedulerDetail = Pick<SchedulerInfo, 'jobCount' | 'schedule' | 'nextRun'>;
+export type SchedulerDetail = Pick<SchedulerInfo, 'jobCount' | 'schedule' | 'nextRun' | 'canRun' | 'nodeRole'>;
 
 export interface ClusterInfo {
   enabled: boolean;
@@ -268,6 +276,10 @@ export function parseSchedulerInfo(value: unknown): SchedulerInfo | null {
     schedule: typeof v.schedule === 'string' && CRON_RE.test(v.schedule) ? v.schedule : null,
     // Arc sends Go's zero time when the schedule does not parse.
     nextRun: nextRunAt > 0 ? new Date(nextRunAt).toISOString() : null,
+    // The retention scheduler reports its cluster gate (can_run, gate_role);
+    // the CQ scheduler does not (see parseSchedulers).
+    canRun: typeof v.can_run === 'boolean' ? v.can_run : null,
+    nodeRole: typeof v.gate_role === 'string' && /^[a-z_]{1,32}$/.test(v.gate_role) ? v.gate_role : null,
   };
 }
 
@@ -277,6 +289,13 @@ export function parseSchedulers(value: unknown): SchedulersInfo | null {
   const v = value as Record<string, unknown>;
   const cq = parseSchedulerInfo(v.cq_scheduler);
   const retention = parseSchedulerInfo(v.retention_scheduler);
+  // Both schedulers skip their ticks on a node that is not the primary writer,
+  // through the same gate (newWriterClusterGate in Arc's cmd/arc/main.go), but
+  // only the retention scheduler reports it. Its answer holds for this node.
+  if (cq && cq.canRun === null && retention?.running && retention.canRun !== null) {
+    cq.canRun = retention.canRun;
+    cq.nodeRole = retention.nodeRole;
+  }
   return cq || retention ? { cq, retention } : null;
 }
 
@@ -331,15 +350,17 @@ function classifyScheduler(probes: ProbeResults, which: keyof SchedulersInfo): C
     return {
       state: 'available',
       reason: 'ok',
-      scheduler: { jobCount: info.jobCount, schedule: info.schedule, nextRun: info.nextRun },
+      scheduler: {
+        jobCount: info.jobCount, schedule: info.schedule, nextRun: info.nextRun, canRun: info.canRun, nodeRole: info.nodeRole,
+      },
     };
   }
   // Created but not running: Arc logged why its Start() failed.
   if (info.reason === null) return { state: 'disabled', reason: 'failed_to_start' };
   // Arc's reasons: "Enterprise license required", "License tier does not
   // include CQ|retention scheduler feature", and "... not enabled
-  // (continuous_query|retention.enabled=false)", to which releases after
-  // v26.09.3 add ", or the scheduler failed to start (see the startup log)".
+  // (continuous_query|retention.enabled=false)", to which Arc main (after
+  // v26.09.4) adds ", or the scheduler failed to start (see the startup log)".
   if (/licen[cs]e/i.test(info.reason)) return { state: 'unlicensed', reason: 'not_licensed' };
   if (/not enabled/i.test(info.reason)) {
     return { state: 'disabled', reason: /failed to start/i.test(info.reason) ? 'off_or_failed_to_start' : 'disabled_in_config' };
@@ -611,7 +632,8 @@ function formatMinute(iso: string): string {
 /** One-line explanation for a capability state, for the UI. */
 export function describeCapability(c: Pick<CapabilityView, 'state' | 'reason' | 'scheduler'>): string {
   if (c.scheduler) {
-    const { jobCount, nextRun } = c.scheduler;
+    const { jobCount, nextRun, canRun, nodeRole } = c.scheduler;
+    if (canRun === false) return `Runs on the primary writer, not on this node${nodeRole ? ` (${nodeRole})` : ''}`;
     if (jobCount !== null) return `Running, ${jobCount} job${jobCount === 1 ? '' : 's'}`;
     return nextRun ? `Running, next run ${formatMinute(nextRun)}` : 'Running';
   }
@@ -656,6 +678,13 @@ export function schedulerNotice(
   const s = SCHEDULED[c.id];
   if (c.state === 'available') {
     const d = c.scheduler;
+    if (d?.canRun === false) {
+      const node = d.nodeRole ? `this node (${d.nodeRole})` : 'this node';
+      return {
+        running: true,
+        message: `${s.name} runs on the cluster’s primary writer; ${node} skips it. ${s.what} run there, not here.`,
+      };
+    }
     let detail = '';
     if (c.id === 'cq_scheduler') {
       if (d && d.jobCount !== null) detail = `, with ${d.jobCount} active quer${d.jobCount === 1 ? 'y' : 'ies'} scheduled`;
