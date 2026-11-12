@@ -25,8 +25,12 @@
     Table2
   } from 'lucide-svelte';
   import PolicyExecutionHistory from './PolicyExecutionHistory.svelte';
+  import SchedulerStatus from './SchedulerStatus.svelte';
+  import type { CapabilityView } from '$lib/capabilities';
 
   export let client: ArcClient;
+  /** Arc's retention scheduler, from capability discovery: policies only run on their own while it runs. */
+  export let scheduler: CapabilityView | null = null;
 
   let policies: RetentionPolicy[] = [];
   let isLoading = true;
@@ -329,6 +333,9 @@
 
   <!-- Content -->
   <div class="flex-1 overflow-auto p-6">
+    {#if !isLoading && !isFeatureDisabled && !error}
+      <SchedulerStatus {scheduler} formatTime={formatDate} />
+    {/if}
     {#if isLoading}
       <div class="flex items-center justify-center py-12">
         <Loader2 class="h-8 w-8 animate-spin text-muted-foreground" />

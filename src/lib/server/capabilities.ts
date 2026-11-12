@@ -18,6 +18,7 @@ import {
   deriveCapabilities,
   parseClusterInfo,
   parseHealthLicense,
+  parseSchedulers,
   type InstanceCapabilities,
   type ProbeOutcome,
   type ProbeResults,
@@ -47,6 +48,8 @@ const PROBE_BODY_BYTES = 512;
 const HEALTH_MAX_BYTES = 64 * 1024;
 /** /api/v1/cluster lists every node with stats. */
 const CLUSTER_MAX_BYTES = 1024 * 1024;
+/** /api/v1/schedulers lists every scheduled continuous query. */
+const SCHEDULERS_MAX_BYTES = 1024 * 1024;
 
 /**
  * Successes are cached long enough that probing does not flood Arc's audit log
@@ -146,7 +149,8 @@ const is2xx = (o: ProbeOutcome | undefined): o is NonNullable<ProbeOutcome> => !
 
 async function runProbes(ctx: ProbeContext): Promise<ProbeResults> {
   const results: ProbeResults = {
-    hasToken: !!ctx.token, health: null, tokenPermissions: null, tokenRejected: false, cluster: null, probes: {},
+    hasToken: !!ctx.token, health: null, tokenPermissions: null, tokenRejected: false, cluster: null, schedulers: null,
+    probes: {},
   };
   if (!ctx.base) return results;
 
@@ -171,15 +175,20 @@ async function runProbes(ctx: ProbeContext): Promise<ProbeResults> {
   }
   const tokenIsAdmin = results.tokenPermissions ? results.tokenPermissions.includes('admin') : null;
 
-  // Round 2: /api/v1/cluster takes any token; the gated areas need admin.
+  // Round 2: /api/v1/cluster and /api/v1/schedulers take any token; the gated
+  // areas need admin.
   const gated = tokenIsAdmin === false ? [] : GATED;
-  const [cluster, ...answers] = await Promise.all([
+  const [cluster, schedulers, ...answers] = await Promise.all([
     probe(ctx, '/api/v1/cluster', { maxResponseBytes: CLUSTER_MAX_BYTES }),
+    probe(ctx, '/api/v1/schedulers', { maxResponseBytes: SCHEDULERS_MAX_BYTES }),
     ...gated.map((g) => probe(ctx, g.path, { truncateResponseAt: PROBE_BODY_BYTES })),
   ]);
   results.clusterProbe = cluster;
   // A disabled cluster answers 200 with success:false and the reason.
   if (is2xx(cluster)) results.cluster = parseClusterInfo(parseJson(cluster.body));
+  results.schedulersProbe = schedulers;
+  // A scheduler that is not running is a 200 too, with the reason.
+  if (is2xx(schedulers)) results.schedulers = parseSchedulers(parseJson(schedulers.body));
   gated.forEach((g, i) => {
     results.probes[g.id] = answers[i];
   });
