@@ -259,6 +259,7 @@ export interface SafeRequestOptions extends SafeUrlOptions {
    * For probes that need the status and a little of the body: a large healthy
    * response is a success here, where maxResponseBytes would make it a failure.
    * Takes precedence: with both set, maxResponseBytes only applies if larger.
+   * 0 resolves as soon as the status line and headers arrive.
    */
   truncateResponseAt?: number;
   /**
@@ -326,6 +327,13 @@ export async function safeRequest(
           let total = 0;
           const done = () =>
             resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) });
+          if (opts.truncateResponseAt === 0) {
+            // Nothing of the body is wanted: do not wait for a first chunk
+            // that a slow or silent server may never send.
+            done();
+            req.destroy();
+            return;
+          }
           res.on('data', (chunk: Buffer) => {
             if (opts.truncateResponseAt !== undefined) {
               const room = opts.truncateResponseAt - total;
@@ -380,22 +388,29 @@ export interface SafePostResult {
 /**
  * POST a JSON payload to a user-configurable webhook URL (SSRF-safe, DNS-pinned
  * via {@link safeRequest}). Non-2xx resolves with the status so callers decide
- * how to treat it.
+ * how to treat it. Resolves on the status line without reading the body, and
+ * timeoutMs bounds the whole request, not only idle gaps.
  */
 export async function safePostJson(
   rawUrl: string,
   payload: string,
   opts: SafeUrlOptions & { timeoutMs?: number } = {},
 ): Promise<SafePostResult> {
+  const timeoutMs = opts.timeoutMs ?? 10_000;
   const res = await safeRequest(rawUrl, {
     ...opts,
     method: 'POST',
     body: payload,
     headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
-    timeoutMs: opts.timeoutMs ?? 10_000,
-    // The response body is intentionally discarded; cap it to prevent a
-    // configured webhook endpoint from forcing unbounded buffering.
-    maxResponseBytes: 64 * 1024,
+    timeoutMs,
+    // Only the status is used. Reading none of the body means a configured
+    // endpoint cannot make Launchpad buffer it, and a large answer to a
+    // delivered POST is not turned into a failure (which would also send the
+    // POST again to the host's next address).
+    truncateResponseAt: 0,
+    // timeoutMs is an idle timeout: an endpoint that drips its headers a byte
+    // at a time never trips it. This bounds the whole request.
+    signal: AbortSignal.timeout(timeoutMs),
   });
   return { status: res.status };
 }
