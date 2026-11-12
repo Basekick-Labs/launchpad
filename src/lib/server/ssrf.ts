@@ -303,6 +303,7 @@ export interface SafeRequestOptions extends SafeUrlOptions {
    * For probes that need the status and a little of the body: a large healthy
    * response is a success here, where maxResponseBytes would make it a failure.
    * Takes precedence: with both set, maxResponseBytes only applies if larger.
+   * 0 resolves as soon as the status line and headers arrive.
    */
   truncateResponseAt?: number;
   /**
@@ -370,6 +371,9 @@ export async function safeRequest(
   const timeoutMs = opts.timeoutMs ?? 15_000;
   const method = opts.method ?? 'GET';
 
+  // Set once a request has been written to a socket: from then on the upstream
+  // may have acted on it, so a non-idempotent request is not sent again.
+  let sent = false;
   const attempt = (ip: string): Promise<SafeResponse> =>
     new Promise<SafeResponse>((resolve, reject) => {
       const req = mod.request(
@@ -389,6 +393,13 @@ export async function safeRequest(
           let total = 0;
           const done = () =>
             resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) });
+          if (opts.truncateResponseAt === 0) {
+            // Nothing of the body is wanted: do not wait for a first chunk
+            // that a slow or silent server may never send.
+            done();
+            req.destroy();
+            return;
+          }
           res.on('data', (chunk: Buffer) => {
             if (opts.truncateResponseAt !== undefined) {
               const room = opts.truncateResponseAt - total;
@@ -415,6 +426,9 @@ export async function safeRequest(
       signal?.addEventListener('abort', onAbort, { once: true });
       req.on('close', () => signal?.removeEventListener('abort', onAbort));
       req.on('error', reject);
+      req.on('finish', () => {
+        sent = true;
+      });
       if (opts.body != null && method !== 'GET' && method !== 'HEAD') req.write(opts.body);
       req.end();
     });
@@ -423,14 +437,19 @@ export async function safeRequest(
   // A host can resolve to multiple families (e.g. ::1 and 127.0.0.1) while the
   // upstream listens on only one; every IP here already passed the safety check,
   // so trying the next is safe. Once we get an HTTP response (any status), we
-  // return it — an HTTP error is a real answer, not a connection failure.
+  // return it — an HTTP error is a real answer, not a connection failure. A
+  // POST (or any method but GET/HEAD) that was written before failing is not
+  // retried: the first address may have received and acted on it.
+  const idempotent = method === 'GET' || method === 'HEAD';
   let lastErr: unknown;
   for (const ip of target.ips) {
     signal?.throwIfAborted();
+    sent = false;
     try {
       return await attempt(ip);
     } catch (err) {
       lastErr = err;
+      if (sent && !idempotent) break;
     }
   }
   throw lastErr ?? new Error('Request failed');
@@ -443,19 +462,33 @@ export interface SafePostResult {
 /**
  * POST a JSON payload to a user-configurable webhook URL (SSRF-safe, DNS-pinned
  * via {@link safeRequest}). Non-2xx resolves with the status so callers decide
- * how to treat it.
+ * how to treat it. Resolves on the status line without reading the body;
+ * timeoutMs is the idle/connect timeout, and the whole request is bounded at
+ * twice that.
  */
 export async function safePostJson(
   rawUrl: string,
   payload: string,
   opts: SafeUrlOptions & { timeoutMs?: number } = {},
 ): Promise<SafePostResult> {
+  const timeoutMs = opts.timeoutMs ?? 10_000;
+  if (!(Number.isFinite(timeoutMs) && timeoutMs > 0)) throw new Error('timeoutMs must be a positive number');
   const res = await safeRequest(rawUrl, {
     ...opts,
     method: 'POST',
     body: payload,
     headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
-    timeoutMs: opts.timeoutMs ?? 10_000,
+    timeoutMs,
+    // Only the status is used. Reading none of the body means a configured
+    // endpoint cannot make Launchpad buffer it, and a large answer to a
+    // delivered POST is not turned into a failure (which would also send the
+    // POST again to the host's next address).
+    truncateResponseAt: 0,
+    // timeoutMs is an idle timeout: an endpoint that drips its headers a byte
+    // at a time never trips it. This bounds the whole request. Twice timeoutMs
+    // leaves room for one fallback to the host's next address when the first
+    // never accepts the connection (the POST is never re-sent once written).
+    signal: AbortSignal.timeout(2 * timeoutMs),
   });
   return { status: res.status };
 }
