@@ -1,4 +1,5 @@
 import http from 'node:http';
+import dns from 'node:dns/promises';
 import net, { type AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { safePostJson } from './ssrf';
@@ -120,10 +121,81 @@ describe('safePostJson response handling', () => {
     }
   }, 10_000);
 
-  it('gives up on an endpoint that never answers, within timeoutMs overall', async () => {
+  it('gives up on an endpoint that never answers', async () => {
     const started = Date.now();
     await expect(safePostJson(url('/noheader'), payload, { ...opts, timeoutMs: 300 })).rejects.toBeTruthy();
     expect(Date.now() - started).toBeLessThan(1500);
     expect(await drained()).toBe(0);
+  });
+
+  it('rejects a timeoutMs that is not a positive number', async () => {
+    await expect(safePostJson(url('/big'), payload, { ...opts, timeoutMs: 0 })).rejects.toThrow(/positive/);
+  });
+});
+
+/**
+ * `localhost` with one listener per address family on the same port, so the
+ * first address safeRequest tries can misbehave while the second is healthy.
+ */
+describe('safePostJson on a host with two addresses', () => {
+  const families = async () => (await dns.lookup('localhost', { all: true })).map((a) => a.address);
+
+  async function pair(first: 'refuse' | 'silent') {
+    const addrs = await families();
+    const hits: Record<string, number> = {};
+    const servers: http.Server[] = [];
+    const sockets = new Set<net.Socket>();
+    let p = 0;
+    for (const [i, addr] of addrs.slice(0, 2).entries()) {
+      if (i === 0 && first === 'refuse') continue; // nothing listens: connection refused
+      const srv = http.createServer((req, res) => {
+        req.resume();
+        req.on('end', () => {
+          hits[addr] = (hits[addr] ?? 0) + 1;
+          if (i === 0) return; // silent: the POST is received, never answered
+          res.writeHead(204);
+          res.end();
+        });
+      });
+      srv.on('connection', (s) => { sockets.add(s); s.on('close', () => sockets.delete(s)); });
+      await new Promise<void>((resolve) => srv.listen({ port: p, host: addr, ipv6Only: true }, resolve));
+      p = (srv.address() as AddressInfo).port;
+      servers.push(srv);
+    }
+    if (first === 'refuse' && p === 0) throw new Error('no listener');
+    return {
+      addrs, hits, port: p,
+      close: async () => {
+        for (const s of sockets) s.destroy();
+        await Promise.all(servers.map((srv) => new Promise<void>((r) => srv.close(() => r()))));
+      },
+    };
+  }
+
+  it('falls back to the next address when the first refuses the connection', async (ctx) => {
+    if ((await families()).length < 2) return ctx.skip();
+    const t = await pair('refuse');
+    try {
+      const res = await safePostJson(`http://localhost:${t.port}/hook`, payload, { ...opts, timeoutMs: 1000 });
+      expect(res.status).toBe(204);
+      expect(t.hits[t.addrs[1]]).toBe(1);
+    } finally {
+      await t.close();
+    }
+  });
+
+  it('does not send the POST again to the next address once the first received it', async (ctx) => {
+    if ((await families()).length < 2) return ctx.skip();
+    // The first port must be free on the second family too; pair() reuses it.
+    const t = await pair('silent');
+    try {
+      await expect(
+        safePostJson(`http://localhost:${t.port}/hook`, payload, { ...opts, timeoutMs: 300 }),
+      ).rejects.toBeTruthy();
+      expect(t.hits[t.addrs[0]]).toBe(1);
+      expect(t.hits[t.addrs[1]] ?? 0).toBe(0);
+    } finally {
+      await t.close();
+    }
   });
 });
