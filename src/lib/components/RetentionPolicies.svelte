@@ -347,12 +347,14 @@
           <p class="text-lg font-medium">Retention Policies Not Available</p>
           <p class="mt-2 text-sm text-muted-foreground max-w-md">
             This feature is not enabled on your Arc server. To enable retention policies,
-            add the following to your Arc configuration:
+            set <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">enabled = true</code> in the <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">[retention]</code> section of the instance's <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">arc.toml</code>:
           </p>
-          <pre class="mt-4 rounded-md bg-muted p-4 text-left text-xs font-mono">retention:
-  enabled: true</pre>
+          <pre class="mt-4 rounded-md bg-muted p-4 text-left text-xs font-mono">[retention]
+enabled = true</pre>
           <p class="mt-4 text-xs text-muted-foreground">
-            After updating the configuration, restart the Arc server.
+            The arc.toml Arc ships already has a <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">[retention]</code> section: change its <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">enabled</code> line
+            rather than adding a second <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">[retention]</code>, which stops Arc from starting.
+            Or set <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">ARC_RETENTION_ENABLED=true</code> in Arc's environment, which overrides arc.toml. Then restart the Arc server.
           </p>
         </div>
         <Button variant="outline" on:click={loadPolicies}>

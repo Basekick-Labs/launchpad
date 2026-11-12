@@ -365,12 +365,14 @@
         <p class="text-lg font-medium">Token Management Not Available</p>
         <p class="mt-2 text-sm text-muted-foreground max-w-md">
           This feature requires authentication to be enabled on your Arc server.
-          Add the following to your Arc configuration:
+          Set <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">enabled = true</code> in the <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">[auth]</code> section of the instance's <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">arc.toml</code>:
         </p>
-        <pre class="mt-4 rounded-md bg-muted p-4 text-left text-xs font-mono">auth:
-  enabled: true</pre>
+        <pre class="mt-4 rounded-md bg-muted p-4 text-left text-xs font-mono">[auth]
+enabled = true</pre>
         <p class="mt-4 text-xs text-muted-foreground">
-          After updating the configuration, restart the Arc server.
+          The arc.toml Arc ships already has an <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">[auth]</code> section: change its <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">enabled</code> line
+          rather than adding a second <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">[auth]</code>, which stops Arc from starting.
+          Or set <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">ARC_AUTH_ENABLED=true</code> in Arc's environment, which overrides arc.toml. Then restart the Arc server.
         </p>
       </div>
       <Button variant="outline" on:click={loadTokens}>
