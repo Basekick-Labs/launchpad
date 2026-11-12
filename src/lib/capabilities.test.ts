@@ -45,6 +45,7 @@ const standalone: ClusterInfo = {
   licenseValid: null,
   features: null,
   version: null,
+  localRole: null,
 };
 
 /**
@@ -193,7 +194,7 @@ describe('deriveCapabilities: partially available', () => {
 
   it('uses a valid cluster feature list to split disabled from unlicensed', () => {
     const p = probes({
-      cluster: { enabled: true, reason: null, licenseValid: true, features: ['clustering', 'tiering'], version: null },
+      cluster: { enabled: true, reason: null, licenseValid: true, features: ['clustering', 'tiering'], version: null, localRole: null },
       probes: { ...probes().probes, tiering: notFound, audit_log: notFound },
     });
     expect(states(p)).toMatchObject({ tiering: 'disabled', audit_log: 'unlicensed' });
@@ -201,7 +202,7 @@ describe('deriveCapabilities: partially available', () => {
 
   it('ignores the feature list of an invalid license', () => {
     const p = probes({
-      cluster: { enabled: false, reason: 'Enterprise license not valid', licenseValid: false, features: ['tiering'], version: null },
+      cluster: { enabled: false, reason: 'Enterprise license not valid', licenseValid: false, features: ['tiering'], version: null, localRole: null },
       probes: { ...probes().probes, tiering: notFound },
     });
     expect(states(p)).toMatchObject({ cluster: 'unlicensed', tiering: 'unavailable' });
@@ -568,8 +569,8 @@ describe('schedulers', () => {
       state: 'available', reason: 'ok', scheduler: { jobCount: 1, schedule: null, nextRun: null, canRun: null, nodeRole: null },
     })).toBe('Running, 1 job');
     const reader = viewForRole(deriveCapabilities(probes({ schedulers: schedulers(SCHEDULERS.clusterReader) })), 'admin');
-    expect(describeCapability(findCapability(reader, 'cq_scheduler')!)).toBe('Runs on the primary writer, not on this node (reader)');
-    expect(describeCapability(findCapability(reader, 'retention_scheduler')!)).toBe('Runs on the primary writer, not on this node (reader)');
+    expect(describeCapability(findCapability(reader, 'cq_scheduler')!)).toBe('Skipped on this node (reader); only the primary writer runs it');
+    expect(describeCapability(findCapability(reader, 'retention_scheduler')!)).toBe('Skipped on this node (reader); only the primary writer runs it');
     expect(describeCapability({ state: 'disabled', reason: 'off_or_failed_to_start' })).toMatch(/failed to start/);
   });
 
@@ -600,11 +601,44 @@ describe('schedulerNotice', () => {
   it('says a node that is not the primary writer leaves the runs to it', () => {
     expect(notice(SCHEDULERS.clusterReader, 'cq_scheduler')).toEqual({
       running: true,
-      message: 'The CQ scheduler runs on the cluster’s primary writer; this node (reader) skips it. Continuous queries run there, not here.',
+      message: 'On a cluster only the primary writer runs continuous queries; this node (reader) skips every run.',
     });
     expect(notice(SCHEDULERS.clusterReader, 'retention_scheduler')?.message).toBe(
-      'The retention scheduler runs on the cluster’s primary writer; this node (reader) skips it. Retention policies run there, not here.',
+      'On a cluster only the primary writer runs retention policies; this node (reader) skips every run.',
     );
+    // A standby writer (writer failover) reports gate_role writer, can_run false.
+    const standby = {
+      cq_scheduler: { job_count: 0, license_valid: true, running: true },
+      retention_scheduler: { can_run: false, gate_role: 'writer', license_valid: true, running: true, schedule: '0 3 * * *' },
+    };
+    expect(notice(standby, 'cq_scheduler')?.message).toMatch(/this node \(a writer that is not the primary\) skips every run\.$/);
+  });
+
+  it('falls back to the cluster role when no scheduler reports the gate', () => {
+    // A reader with retention.enabled=false: no retention gate to infer from.
+    const body = {
+      cq_scheduler: { job_count: 1, license_valid: true, running: true },
+      retention_scheduler: { enabled: false, reason: 'Retention feature not enabled (retention.enabled=false)' },
+    };
+    const cluster = (localRole: string | null) => ({
+      enabled: true, reason: null, licenseValid: true, features: null, version: null, localRole,
+    });
+    const at = (localRole: string | null) =>
+      schedulerNotice(findCapability(viewForRole(deriveCapabilities(probes({ schedulers: schedulers(body), cluster: cluster(localRole) })), 'admin'), 'cq_scheduler'));
+    expect(at('reader')?.message).toBe('On a cluster only the primary writer runs continuous queries; this node (reader) skips every run.');
+    expect(at('compactor')?.message).toMatch(/this node \(compactor\)/);
+    // A writer may or may not be the primary: say what Arc reports.
+    expect(at('writer')?.message).toBe('The CQ scheduler is running, with 1 active query scheduled.');
+    expect(parseClusterInfo({ enabled: true, local_role: 'reader' })?.localRole).toBe('reader');
+    expect(parseClusterInfo({ enabled: true, local_role: '<i>' })?.localRole).toBeNull();
+  });
+
+  it('infers the CQ gate from a retention scheduler that is not running', () => {
+    const body = {
+      cq_scheduler: { job_count: 0, license_valid: true, running: true },
+      retention_scheduler: { can_run: false, gate_role: 'reader', license_valid: true, running: false, schedule: '0 3 * * *' },
+    };
+    expect(notice(body, 'cq_scheduler')?.message).toMatch(/this node \(reader\) skips every run/);
   });
 
   it('explains each reason it is not running, and that runs are then manual only', () => {

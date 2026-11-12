@@ -139,6 +139,8 @@ export interface ClusterInfo {
   licenseValid: boolean | null;
   features: string[] | null;
   version: string | null;
+  /** The answering node's cluster role (local_role), identifier-checked. */
+  localRole: string | null;
 }
 
 export interface ProbeResults {
@@ -248,6 +250,7 @@ export function parseClusterInfo(value: unknown): ClusterInfo | null {
     licenseValid: typeof lic?.valid === 'boolean' ? lic.valid : null,
     features,
     version,
+    localRole: typeof v.local_role === 'string' && /^[a-z_]{1,32}$/.test(v.local_role) ? v.local_role : null,
   };
 }
 
@@ -291,8 +294,9 @@ export function parseSchedulers(value: unknown): SchedulersInfo | null {
   const retention = parseSchedulerInfo(v.retention_scheduler);
   // Both schedulers skip their ticks on a node that is not the primary writer,
   // through the same gate (newWriterClusterGate in Arc's cmd/arc/main.go), but
-  // only the retention scheduler reports it. Its answer holds for this node.
-  if (cq && cq.canRun === null && retention?.running && retention.canRun !== null) {
+  // only the retention scheduler reports it (whenever it has a gate, running
+  // or not). Its answer holds for this node.
+  if (cq && cq.canRun === null && retention && retention.canRun !== null) {
     cq.canRun = retention.canRun;
     cq.nodeRole = retention.nodeRole;
   }
@@ -338,6 +342,7 @@ function classifyCluster(probes: ProbeResults, license: LicenseSummary | null): 
 }
 
 function classifyScheduler(probes: ProbeResults, which: keyof SchedulersInfo): CapabilityResult {
+  const cluster = probes.cluster;
   if (!probes.schedulers) {
     return probes.schedulersProbe === undefined ? { state: 'unknown', reason: 'error' } : classifyFailure(probes.schedulersProbe);
   }
@@ -347,12 +352,18 @@ function classifyScheduler(probes: ProbeResults, which: keyof SchedulersInfo): C
   // skips every run (internal/scheduler/*_scheduler.go).
   if (info.licenseValid === false) return { state: 'unlicensed', reason: 'not_licensed' };
   if (info.running) {
+    let { canRun, nodeRole } = info;
+    // No gate reported (e.g. retention off on this node, so nothing to infer
+    // the CQ gate from): a reader or compactor is never the primary writer.
+    const role = cluster?.enabled ? cluster.localRole : null;
+    if (canRun === null && (role === 'reader' || role === 'compactor')) {
+      canRun = false;
+      nodeRole = role;
+    }
     return {
       state: 'available',
       reason: 'ok',
-      scheduler: {
-        jobCount: info.jobCount, schedule: info.schedule, nextRun: info.nextRun, canRun: info.canRun, nodeRole: info.nodeRole,
-      },
+      scheduler: { jobCount: info.jobCount, schedule: info.schedule, nextRun: info.nextRun, canRun, nodeRole },
     };
   }
   // Created but not running: Arc logged why its Start() failed.
@@ -427,7 +438,9 @@ export function deriveCapabilities(probes: ProbeResults): InstanceCapabilities {
     if (def.probePath === null) {
       if (skipped && skipped !== 'token_not_admin') return { state: 'unknown', reason: skipped };
       if (def.id === 'cluster') return classifyCluster(probes, license);
-      return classifyScheduler(probes, def.id === 'cq_scheduler' ? 'cq' : 'retention');
+      if (def.id === 'cq_scheduler') return classifyScheduler(probes, 'cq');
+      if (def.id === 'retention_scheduler') return classifyScheduler(probes, 'retention');
+      return { state: 'unknown', reason: 'error' };
     }
     if (skipped) return { state: 'unknown', reason: skipped };
     return classifyProbe(def, probes.probes[def.id], license, features);
@@ -624,6 +637,12 @@ export function capabilityUsable(view: CapabilitiesView | null, id: CapabilityId
   return capabilityIn(view, id, ['available']);
 }
 
+/** A node that is not the primary writer, for the scheduler texts. */
+function nodeLabel(role: string | null): string {
+  if (role === 'writer') return 'a writer that is not the primary';
+  return role ?? 'not the primary writer';
+}
+
 /** A UTC minute, for times shown outside the browser's locale formatting. */
 function formatMinute(iso: string): string {
   return `${iso.slice(0, 16).replace('T', ' ')} UTC`;
@@ -633,7 +652,7 @@ function formatMinute(iso: string): string {
 export function describeCapability(c: Pick<CapabilityView, 'state' | 'reason' | 'scheduler'>): string {
   if (c.scheduler) {
     const { jobCount, nextRun, canRun, nodeRole } = c.scheduler;
-    if (canRun === false) return `Runs on the primary writer, not on this node${nodeRole ? ` (${nodeRole})` : ''}`;
+    if (canRun === false) return `Skipped on this node (${nodeLabel(nodeRole)}); only the primary writer runs it`;
     if (jobCount !== null) return `Running, ${jobCount} job${jobCount === 1 ? '' : 's'}`;
     return nextRun ? `Running, next run ${formatMinute(nextRun)}` : 'Running';
   }
@@ -679,10 +698,9 @@ export function schedulerNotice(
   if (c.state === 'available') {
     const d = c.scheduler;
     if (d?.canRun === false) {
-      const node = d.nodeRole ? `this node (${d.nodeRole})` : 'this node';
       return {
         running: true,
-        message: `${s.name} runs on the cluster’s primary writer; ${node} skips it. ${s.what} run there, not here.`,
+        message: `On a cluster only the primary writer runs ${s.what.toLowerCase()}; this node (${nodeLabel(d.nodeRole)}) skips every run.`,
       };
     }
     let detail = '';
