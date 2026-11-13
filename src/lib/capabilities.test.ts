@@ -687,6 +687,16 @@ describe('console views (#100)', () => {
     }
   });
 
+  it('does not read a retention or CQ 503 as turned off', () => {
+    // Arc main answers 503 "retry in a few seconds" on a cluster node that has
+    // not caught up; the routes are absent, not 503, when turned off. A backup
+    // 503 still means off.
+    const busy: ProbeOutcome = { status: 503, body: '{"error":"this node has not caught up with the cluster\'s retention policies yet; retry in a few seconds"}' };
+    const view = caps({ probes: { ...probes().probes, retention: busy, continuous_queries: busy, tokens: busy, backup: busy } });
+    for (const id of VIEWS) expect(findCapability(view, id)).toMatchObject({ state: 'unknown', reason: 'error' });
+    expect(findCapability(view, 'backup')).toMatchObject({ state: 'disabled', reason: 'turned_off' });
+  });
+
   it('probes an Arc without auth when no token is stored', () => {
     // runProbes sets arcAuthOff when the public verify route is a 404.
     const view = caps({

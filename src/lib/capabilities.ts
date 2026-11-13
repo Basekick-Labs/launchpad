@@ -401,6 +401,8 @@ function classifyScheduler(probes: ProbeResults, which: keyof SchedulersInfo): C
   return { state: 'unknown', reason: 'error' };
 }
 
+const ROUTE_ABSENT_WHEN_OFF: ReadonlySet<CapabilityId> = new Set(['retention', 'continuous_queries', 'tokens']);
+
 function classifyProbe(
   def: CapabilityDefinition,
   outcome: ProbeOutcome | undefined,
@@ -432,7 +434,13 @@ function classifyProbe(
     }
     return { state: 'unavailable', reason: 'not_enabled' };
   }
-  if (status === 503) return { state: 'disabled', reason: def.licenseFeature === null ? 'turned_off' : 'disabled_in_config' };
+  // Retention, continuous query and token routes are absent (404) when off. A
+  // 503 from them is Arc main's cluster node that has not caught up yet
+  // ("retry in a few seconds", internal/api/retention_cluster.go and
+  // cq_cluster.go), not config.
+  if (status === 503 && !ROUTE_ABSENT_WHEN_OFF.has(def.id)) {
+    return { state: 'disabled', reason: def.licenseFeature === null ? 'turned_off' : 'disabled_in_config' };
+  }
   return classifyFailure(outcome);
 }
 
