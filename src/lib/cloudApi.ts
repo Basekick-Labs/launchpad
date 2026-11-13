@@ -3,6 +3,7 @@ import type { ClusterViewData, NodeLogsData, NodeSnapshotData } from '$lib/clust
 import type { ChangePage } from '$lib/changeLog';
 import type { RbacChange, RbacSnapshot } from '$lib/rbac';
 import type { GovernanceView, NodeUsage } from '$lib/governance';
+import type { AuditFilter, AuditPage, AuditStats } from '$lib/auditLog';
 
 export interface User {
   id: string;
@@ -404,4 +405,33 @@ export function getGovernance(orgId: string, id: string, signal?: AbortSignal): 
 
 export async function getTokenQueryUsage(orgId: string, id: string, tokenId: number, signal?: AbortSignal): Promise<NodeUsage[]> {
   return (await clusterFetch<{ nodes: NodeUsage[] }>(`${governancePath(orgId, id)}/${tokenId}/usage`, signal)).nodes;
+}
+
+// ---------------------------------------------------------------------------
+// Audit log (#12)
+
+const auditPath = (orgId: string, id: string) => `/api/v1/orgs/${encodeURIComponent(orgId)}/instances/${encodeURIComponent(id)}/audit`;
+
+function auditParams(values: Record<string, string | number | null>): URLSearchParams {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(values)) if (v !== null && v !== '') params.set(k, String(v));
+  return params;
+}
+
+/** One page of audit events; pass the previous page's `next` as `cursor` (with the same filter) for older ones. */
+export function getAuditEvents(orgId: string, id: string, filter: AuditFilter, cursor: string | null, signal?: AbortSignal): Promise<AuditPage> {
+  const params = auditParams({
+    event_type: filter.eventType,
+    actor: filter.actor,
+    database: filter.database,
+    since: filter.since,
+    until: filter.until,
+    node: filter.node,
+    cursor,
+  });
+  return clusterFetch(`${auditPath(orgId, id)}?${params}`, signal);
+}
+
+export function getAuditStats(orgId: string, id: string, q: { since: string | null; node: string | null }, signal?: AbortSignal): Promise<AuditStats> {
+  return clusterFetch(`${auditPath(orgId, id)}/stats?${auditParams(q)}`, signal);
 }
