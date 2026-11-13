@@ -12,6 +12,7 @@ It does **not** provision or host databases. You point it at Arc instances you a
 - **Logs viewer** with pattern detection and trace extraction
 - **Token management** and retention policies for your Arc instances
 - **Alerts** and **continuous queries**
+- **Audit log** (Arc Enterprise): the requests Arc recorded on every node, filtered by time, event type, actor, database and node
 - **Organizations & teams** — invite users, assign roles
 - **Local auth** — email/password with optional MFA (TOTP) and passkeys (WebAuthn)
 
