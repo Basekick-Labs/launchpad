@@ -19,15 +19,20 @@
     AlertTriangle,
     Loader2,
     Ban,
-    ShieldAlert,
     Clock,
     ShieldCheck,
-    AlertCircle
+    AlertCircle,
+    Lock
   } from 'lucide-svelte';
   import { toast } from 'svelte-sonner';
+  import { accessProblem, type CapabilityView } from '$lib/capabilities';
+  import { roleAtLeast } from '$lib/roles';
 
   export let client: ArcClient;
   export let arcVersion: string = '';
+  export let currentRole: string = 'viewer';
+  /** Token management in Arc, from capability discovery: why listing tokens failed. */
+  export let capability: CapabilityView | null = null;
   /**
    * When the Access view is shown alongside (Enterprise), tokens can be
    * selected to see their teams and access. `changed` fires after any token
@@ -38,7 +43,11 @@
   /** Arc RBAC teams per token id, shown on each card (Enterprise). */
   export let teamsByToken: Record<number, string[]> | null = null;
 
-  const dispatch = createEventDispatcher<{ select: TokenInfo; changed: void }>();
+  /** `recheck`: discovery may be stale, e.g. after Arc's configuration changed. */
+  const dispatch = createEventDispatcher<{ select: TokenInfo; changed: void; recheck: void }>();
+
+  // The proxy only lets owners and admins reach Arc's token routes.
+  $: canManage = roleAtLeast(currentRole, 'admin');
 
   function isVersionAffected(version: string): boolean {
     if (!version) return false;
@@ -56,8 +65,6 @@
   let tokens: TokenInfo[] = [];
   let isLoading = false;
   let error = '';
-  let featureAvailable = true;
-  let adminRequired = false;
 
   // Create token dialog
   let showCreateDialog = false;
@@ -96,31 +103,28 @@
   ];
 
   async function loadTokens() {
+    if (!canManage) return;
     isLoading = true;
     error = '';
-    featureAvailable = true;
-    adminRequired = false;
 
     try {
       tokens = await client.listTokens();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to load tokens';
       console.error('Token load error:', err);
-
-      // Check for specific error types
-      if (msg.includes('Cannot GET') || msg.includes('404') || msg.includes('not found')) {
-        featureAvailable = false;
-        error = 'Token management is not available in this Arc version';
-      } else if (msg.includes('admin') || msg.includes('403') || msg.includes('Forbidden') || msg.includes('Permission denied')) {
-        adminRequired = true;
-        error = 'Admin permission required to manage tokens';
-      } else {
-        error = msg;
-      }
+      // Why it failed comes from discovery (`capability`), not this text.
+      error = err instanceof Error ? err.message : 'Failed to load tokens';
     } finally {
       isLoading = false;
     }
   }
+
+  function checkAgain() {
+    dispatch('recheck');
+    loadTokens();
+  }
+
+  // Arc runs without authentication: it has no token routes at all.
+  $: authOff = !!error && capability?.state === 'disabled';
 
   function openCreateDialog() {
     newTokenName = '';
@@ -331,18 +335,20 @@
       <h2 class="text-lg font-semibold">API Tokens</h2>
       <p class="text-sm text-muted-foreground">Manage API tokens for authentication</p>
     </div>
-    <div class="flex items-center gap-2">
-      <Button variant="outline" size="sm" on:click={loadTokens} disabled={isLoading}>
-        <RefreshCw class={cn('mr-2 h-4 w-4', isLoading && 'animate-spin')} />
-        Refresh
-      </Button>
-      {#if featureAvailable && !adminRequired}
-        <Button size="sm" on:click={openCreateDialog} disabled={isLoading}>
-          <Plus class="mr-2 h-4 w-4" />
-          Create Token
+    {#if canManage}
+      <div class="flex items-center gap-2">
+        <Button variant="outline" size="sm" on:click={loadTokens} disabled={isLoading}>
+          <RefreshCw class={cn('mr-2 h-4 w-4', isLoading && 'animate-spin')} />
+          Refresh
         </Button>
-      {/if}
-    </div>
+        {#if !error}
+          <Button size="sm" on:click={openCreateDialog} disabled={isLoading}>
+            <Plus class="mr-2 h-4 w-4" />
+            Create Token
+          </Button>
+        {/if}
+      </div>
+    {/if}
   </div>
 
   {#if showExpiryWarning}
@@ -358,7 +364,15 @@
 
   <!-- Content -->
   <div class="flex-1 overflow-auto p-6">
-  {#if !featureAvailable}
+  {#if !canManage}
+    <div class="flex flex-col items-center justify-center gap-4 rounded-lg border border-dashed py-12 text-center">
+      <Lock class="h-12 w-12 text-muted-foreground/30" />
+      <div>
+        <p class="text-lg font-medium">Token management requires admin access</p>
+        <p class="text-sm text-muted-foreground">Ask an organization owner or admin to manage API tokens.</p>
+      </div>
+    </div>
+  {:else if authOff}
     <div class="flex flex-col items-center justify-center gap-4 py-12 text-center">
       <Key class="h-12 w-12 text-muted-foreground/30" />
       <div>
@@ -375,26 +389,16 @@ enabled = true</pre>
           Or set <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">ARC_AUTH_ENABLED=true</code> in Arc's environment, which overrides arc.toml. Then restart the Arc server.
         </p>
       </div>
-      <Button variant="outline" on:click={loadTokens}>
+      <Button variant="outline" on:click={checkAgain}>
         <RefreshCw class="mr-2 h-4 w-4" />
         Check Again
       </Button>
     </div>
-  {:else if adminRequired}
-    <div class="flex flex-col items-center justify-center gap-4 py-12 text-center">
-      <ShieldAlert class="h-12 w-12 text-yellow-500/50" />
-      <div>
-        <p class="text-lg font-medium">Admin Permission Required</p>
-        <p class="mt-2 text-sm text-muted-foreground max-w-md">
-          You need admin permissions to manage tokens. Please use a token with admin access.
-        </p>
-      </div>
-    </div>
-  {:else if error && !adminRequired && featureAvailable}
+  {:else if error}
     <div class="flex flex-col items-center justify-center gap-4 py-12">
       <AlertCircle class="h-12 w-12 text-destructive" />
-      <p class="text-destructive">{error}</p>
-      <Button variant="outline" on:click={loadTokens}>Try Again</Button>
+      <p class="text-destructive">{accessProblem(capability) ?? error}</p>
+      <Button variant="outline" on:click={checkAgain}>Try Again</Button>
     </div>
   {:else if isLoading && tokens.length === 0}
     <div class="flex items-center justify-center py-12">

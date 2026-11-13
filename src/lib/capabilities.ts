@@ -20,7 +20,10 @@ export type CapabilityId =
   | 'backup'
   | 'compaction'
   | 'cq_scheduler'
-  | 'retention_scheduler';
+  | 'retention_scheduler'
+  | 'retention'
+  | 'continuous_queries'
+  | 'tokens';
 
 export interface CapabilityDefinition {
   id: CapabilityId;
@@ -30,26 +33,39 @@ export interface CapabilityDefinition {
   /**
    * Cheap admin-gated GET whose status says whether the area is served. Chosen
    * for a small, bounded handler: tiering/status and audit/stats scan tables,
-   * so tiering/policies and audit/logs?limit=1 stand in for them. Null when
-   * the state comes from /api/v1/cluster or /api/v1/schedulers instead.
+   * so tiering/policies and audit/logs?limit=1 stand in for them. Retention,
+   * continuous queries and tokens have only their list routes, over small
+   * tables. Null when the state comes from /api/v1/cluster or
+   * /api/v1/schedulers instead.
    */
   probePath: string | null;
   minRole: OrgRole;
+  /**
+   * Listed in the instance page's Enterprise features card. False for the
+   * areas every Arc has, which only their own console views explain.
+   */
+  enterprise: boolean;
 }
 
 export const CAPABILITIES: readonly CapabilityDefinition[] = [
-  { id: 'cluster', label: 'Clustering', licenseFeature: 'clustering', probePath: null, minRole: 'admin' },
-  { id: 'rbac', label: 'Role-based access control', licenseFeature: 'rbac', probePath: '/api/v1/rbac/organizations', minRole: 'admin' },
-  { id: 'tiering', label: 'Tiered storage', licenseFeature: 'tiering', probePath: '/api/v1/tiering/policies', minRole: 'admin' },
-  { id: 'query_governance', label: 'Query governance', licenseFeature: 'query_governance', probePath: '/api/v1/governance/policies', minRole: 'admin' },
-  { id: 'query_management', label: 'Active query management', licenseFeature: 'query_management', probePath: '/api/v1/queries/active', minRole: 'admin' },
-  { id: 'audit_log', label: 'Audit log', licenseFeature: 'audit_logging', probePath: '/api/v1/audit/logs?limit=1', minRole: 'admin' },
-  { id: 'backup', label: 'Backup and restore', licenseFeature: null, probePath: '/api/v1/backup/status', minRole: 'admin' },
-  { id: 'compaction', label: 'Compaction', licenseFeature: null, probePath: '/api/v1/compaction/status', minRole: 'admin' },
+  { id: 'cluster', label: 'Clustering', licenseFeature: 'clustering', probePath: null, minRole: 'admin', enterprise: true },
+  { id: 'rbac', label: 'Role-based access control', licenseFeature: 'rbac', probePath: '/api/v1/rbac/organizations', minRole: 'admin', enterprise: true },
+  { id: 'tiering', label: 'Tiered storage', licenseFeature: 'tiering', probePath: '/api/v1/tiering/policies', minRole: 'admin', enterprise: true },
+  { id: 'query_governance', label: 'Query governance', licenseFeature: 'query_governance', probePath: '/api/v1/governance/policies', minRole: 'admin', enterprise: true },
+  { id: 'query_management', label: 'Active query management', licenseFeature: 'query_management', probePath: '/api/v1/queries/active', minRole: 'admin', enterprise: true },
+  { id: 'audit_log', label: 'Audit log', licenseFeature: 'audit_logging', probePath: '/api/v1/audit/logs?limit=1', minRole: 'admin', enterprise: true },
+  { id: 'backup', label: 'Backup and restore', licenseFeature: null, probePath: '/api/v1/backup/status', minRole: 'admin', enterprise: true },
+  { id: 'compaction', label: 'Compaction', licenseFeature: null, probePath: '/api/v1/compaction/status', minRole: 'admin', enterprise: true },
   // Admin-only like the Retention and CQ tabs they explain: the proxy does not
   // let members reach either area.
-  { id: 'cq_scheduler', label: 'CQ scheduler', licenseFeature: 'cq_scheduler', probePath: null, minRole: 'admin' },
-  { id: 'retention_scheduler', label: 'Retention scheduler', licenseFeature: 'retention_scheduler', probePath: null, minRole: 'admin' },
+  { id: 'cq_scheduler', label: 'CQ scheduler', licenseFeature: 'cq_scheduler', probePath: null, minRole: 'admin', enterprise: true },
+  { id: 'retention_scheduler', label: 'Retention scheduler', licenseFeature: 'retention_scheduler', probePath: null, minRole: 'admin', enterprise: true },
+  // The Retention, Continuous Queries and Tokens tabs, which every Arc has
+  // unless its configuration turns them off. All three routes are admin-only
+  // in Arc, and the proxy does not let members reach them either.
+  { id: 'retention', label: 'Retention policies', licenseFeature: null, probePath: '/api/v1/retention', minRole: 'admin', enterprise: false },
+  { id: 'continuous_queries', label: 'Continuous queries', licenseFeature: null, probePath: '/api/v1/continuous_queries', minRole: 'admin', enterprise: false },
+  { id: 'tokens', label: 'Token management', licenseFeature: null, probePath: '/api/v1/auth/tokens', minRole: 'admin', enterprise: false },
 ];
 
 export type CapabilityState = 'available' | 'unlicensed' | 'disabled' | 'unavailable' | 'unknown';
@@ -145,10 +161,16 @@ export interface ClusterInfo {
 
 export interface ProbeResults {
   /**
-   * Whether a token is stored. Without one only /health is probed: an Arc with
-   * auth on would log every other probe as a failed authentication.
+   * Whether a token is stored. Without one only /health and the public
+   * /api/v1/auth/verify are probed, unless that shows Arc runs without auth:
+   * an Arc with auth on would log every other probe as a failed authentication.
    */
   hasToken: boolean;
+  /**
+   * No token is stored and Arc answered 404 to /api/v1/auth/verify: it runs
+   * without auth, so the other probes ran without a token.
+   */
+  arcAuthOff?: boolean;
   /** null when /health could not be read at all. */
   health: { license: LicenseSummary | null } | null;
   /** Permissions of the stored token from /api/v1/auth/verify; null = unknown. */
@@ -379,6 +401,8 @@ function classifyScheduler(probes: ProbeResults, which: keyof SchedulersInfo): C
   return { state: 'unknown', reason: 'error' };
 }
 
+const ROUTE_ABSENT_WHEN_OFF: ReadonlySet<CapabilityId> = new Set(['retention', 'continuous_queries', 'tokens']);
+
 function classifyProbe(
   def: CapabilityDefinition,
   outcome: ProbeOutcome | undefined,
@@ -395,11 +419,12 @@ function classifyProbe(
     return { state: 'unlicensed', reason: 'not_licensed' };
   }
   if (status === 404) {
-    // OSS features (backup, compaction) are only absent when off in config.
+    // RBAC and token routes register whenever Arc auth is on (unlicensed RBAC
+    // is a 403), so a 404 means Arc runs without auth.
+    if (def.id === 'rbac' || def.id === 'tokens') return { state: 'disabled', reason: 'arc_auth_off' };
+    // Other OSS features (backup, compaction, retention, continuous queries)
+    // are only absent when off in config.
     if (def.licenseFeature === null) return { state: 'disabled', reason: 'turned_off' };
-    // RBAC routes register whenever Arc auth is on (unlicensed is a 403), so a
-    // 404 means Arc runs without auth.
-    if (def.id === 'rbac') return { state: 'disabled', reason: 'arc_auth_off' };
     // Other gated routes are registered at boot only when licensed AND enabled.
     if (!licenseIsLive(license)) return { state: 'unlicensed', reason: 'not_licensed' };
     if (features) {
@@ -409,13 +434,19 @@ function classifyProbe(
     }
     return { state: 'unavailable', reason: 'not_enabled' };
   }
-  if (status === 503) return { state: 'disabled', reason: def.licenseFeature === null ? 'turned_off' : 'disabled_in_config' };
+  // Retention, continuous query and token routes are absent (404) when off. A
+  // 503 from them is Arc main's cluster node that has not caught up yet
+  // ("retry in a few seconds", internal/api/retention_cluster.go and
+  // cq_cluster.go), not config.
+  if (status === 503 && !ROUTE_ABSENT_WHEN_OFF.has(def.id)) {
+    return { state: 'disabled', reason: def.licenseFeature === null ? 'turned_off' : 'disabled_in_config' };
+  }
   return classifyFailure(outcome);
 }
 
 /** Why gated probes were skipped, when the token says they would fail. */
 function skippedReason(probes: ProbeResults, tokenIsAdmin: boolean | null): CapabilityReason | null {
-  if (!probes.hasToken) return 'no_token';
+  if (!probes.hasToken && !probes.arcAuthOff) return 'no_token';
   if (probes.tokenRejected) return 'token_rejected';
   if (tokenIsAdmin === false) return 'token_not_admin';
   return null;
@@ -632,6 +663,13 @@ export function findCapability(view: CapabilitiesView | null, id: CapabilityId):
   return view?.capabilities.find((x) => x.id === id) ?? null;
 }
 
+const ENTERPRISE_IDS = new Set(CAPABILITIES.filter((d) => d.enterprise).map((d) => d.id));
+
+/** What the instance page's Enterprise features card lists, in registry order. */
+export function enterpriseCapabilities(view: CapabilitiesView | null): CapabilityView[] {
+  return view?.capabilities.filter((c) => ENTERPRISE_IDS.has(c.id)) ?? [];
+}
+
 /** The common case of {@link capabilityIn}: the instance serves it. */
 export function capabilityUsable(view: CapabilitiesView | null, id: CapabilityId): boolean {
   return capabilityIn(view, id, ['available']);
@@ -670,6 +708,28 @@ export function describeCapability(c: Pick<CapabilityView, 'state' | 'reason' | 
     case 'no_token': return 'Cannot check: no admin token is stored';
     case 'unreachable': return 'Cannot check: Arc did not respond';
     case 'error': return 'Cannot check: unexpected response from Arc';
+  }
+}
+
+/**
+ * What a console view says when loading its area failed and discovery knows
+ * the stored token or the instance is the cause. Null otherwise (including
+ * the area being off, which each view explains with its own configuration),
+ * so the view shows the error it got.
+ */
+export function accessProblem(c: Pick<CapabilityView, 'state' | 'reason'> | null): string | null {
+  if (c?.state !== 'unknown') return null;
+  switch (c.reason) {
+    case 'token_not_admin':
+      return 'The Arc token stored for this connection is not an admin token. Update the connection with an admin token.';
+    case 'token_rejected':
+      return 'Arc rejected the token stored for this connection. Update the connection with a valid admin token.';
+    case 'no_token':
+      return 'No Arc token is stored for this connection. Update the connection with an admin token.';
+    case 'unreachable':
+      return 'Arc did not respond. Check that the instance is running and that Launchpad can reach it.';
+    default:
+      return null;
   }
 }
 

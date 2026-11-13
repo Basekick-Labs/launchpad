@@ -4,7 +4,9 @@
  * Arc has no capabilities endpoint, so this probes the routes that exist and
  * hands the answers to the pure decision table in $lib/capabilities. Every
  * probe carries the instance's admin token, so discovery does not depend on
- * which Arc routes answer without authentication.
+ * which Arc routes answer without authentication. Without a stored token,
+ * only /health and the public /api/v1/auth/verify are asked, and the rest
+ * only when that shows Arc runs without auth.
  *
  * Deliberately free of $env imports (the caller passes allowPrivate) so the
  * module runs under vitest against a real local HTTP server.
@@ -154,15 +156,21 @@ async function runProbes(ctx: ProbeContext): Promise<ProbeResults> {
   };
   if (!ctx.base) return results;
 
-  // Round 1: /health, plus the token check when there is a token. Arc serves
-  // /api/v1/auth/verify publicly, so it costs no auth-failure count.
+  // Round 1: /health and the token check. Arc serves /api/v1/auth/verify
+  // publicly, so it costs no auth-failure count, with or without a token.
   const [health, verify] = await Promise.all([
     probe(ctx, '/health', { maxResponseBytes: HEALTH_MAX_BYTES }),
-    ctx.token ? probe(ctx, '/api/v1/auth/verify', { maxResponseBytes: HEALTH_MAX_BYTES }) : Promise.resolve(undefined),
+    probe(ctx, '/api/v1/auth/verify', { maxResponseBytes: HEALTH_MAX_BYTES }),
   ]);
   if (!is2xx(health)) return results;
   results.health = { license: parseHealthLicense(asObject(parseJson(health.body))?.license) };
-  if (!ctx.token) return results;
+  if (!ctx.token) {
+    // Arc registers /api/v1/auth/* only when auth is on, so a 404 means no
+    // route needs a token and the rest can be probed without one. Anything
+    // else (the 401 an auth-on Arc gives a missing token) stops here.
+    if (verify?.status !== 404) return results;
+    results.arcAuthOff = true;
+  }
 
   if (verify?.status === 401) {
     // Every further probe would be a 401, and an auth-failure tick in Arc.

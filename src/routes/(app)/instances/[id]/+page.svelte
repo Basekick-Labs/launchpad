@@ -7,7 +7,7 @@
     type Instance
   } from '$lib/cloudApi';
   import type { ChangeEntry } from '$lib/changeLog';
-  import { describeCapability, tierLabel, type CapabilitiesView, type CapabilityState } from '$lib/capabilities';
+  import { describeCapability, enterpriseCapabilities, tierLabel, type CapabilitiesView, type CapabilityState } from '$lib/capabilities';
   import { roleAtLeast } from '$lib/roles';
   import { Button } from '$lib/components/ui/button';
   import { toast } from 'svelte-sonner';
@@ -372,7 +372,7 @@
           </Button>
         </div>
         <ul class="divide-y">
-          {#each capabilities.capabilities as cap (cap.id)}
+          {#each enterpriseCapabilities(capabilities) as cap (cap.id)}
             <li class="flex items-center justify-between gap-4 py-2">
               <div class="flex items-center gap-2">
                 <div class="h-2 w-2 rounded-full {STATE_DOT[cap.state]}" aria-hidden="true" />

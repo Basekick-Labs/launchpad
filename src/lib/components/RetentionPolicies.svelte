@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { createEventDispatcher, onMount } from 'svelte';
   import { retentionPolicyEditFields, type ArcClient, type RetentionPolicy, type RetentionExecution, type RetentionExecuteResult, type CreateRetentionPolicy } from '$lib/arcClient';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
@@ -22,20 +22,30 @@
     Clock,
     AlertCircle,
     Database,
-    Table2
+    Table2,
+    Lock
   } from 'lucide-svelte';
   import PolicyExecutionHistory from './PolicyExecutionHistory.svelte';
   import SchedulerStatus from './SchedulerStatus.svelte';
-  import type { CapabilityView } from '$lib/capabilities';
+  import { accessProblem, type CapabilityView } from '$lib/capabilities';
+  import { roleAtLeast } from '$lib/roles';
 
   export let client: ArcClient;
+  export let currentRole: string = 'viewer';
+  /** Retention in Arc, from capability discovery: why loading policies failed. */
+  export let capability: CapabilityView | null = null;
   /** Arc's retention scheduler, from capability discovery: policies only run on their own while it runs. */
   export let scheduler: CapabilityView | null = null;
+
+  /** `recheck`: discovery may be stale, e.g. after Arc's configuration changed. */
+  const dispatch = createEventDispatcher<{ recheck: void }>();
+
+  // The proxy only lets owners and admins reach Arc's retention routes.
+  $: canManage = roleAtLeast(currentRole, 'admin');
 
   let policies: RetentionPolicy[] = [];
   let isLoading = true;
   let error: string | null = null;
-  let isFeatureDisabled = false;
 
   // Dialog state
   let showCreateDialog = false;
@@ -86,28 +96,22 @@
   });
 
   async function loadPolicies() {
+    if (!canManage) return;
     isLoading = true;
     error = null;
-    isFeatureDisabled = false;
     try {
       policies = await client.getRetentionPolicies() || [];
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to load retention policies';
-      // Check if the error indicates the feature is disabled or endpoint doesn't exist
-      if (errorMsg.includes('Cannot GET') || errorMsg.includes('404') || errorMsg.includes('not found')) {
-        isFeatureDisabled = true;
-        error = null;
-      } else if (errorMsg.includes('disabled')) {
-        isFeatureDisabled = true;
-        error = null;
-      } else if (errorMsg.includes('Forbidden') || errorMsg.includes('403')) {
-        error = 'Admin access is required to manage retention policies.';
-      } else {
-        error = errorMsg;
-      }
+      // Why it failed comes from discovery (`capability`), not this text.
+      error = err instanceof Error ? err.message : 'Failed to load retention policies';
     } finally {
       isLoading = false;
     }
+  }
+
+  function checkAgain() {
+    dispatch('recheck');
+    loadPolicies();
   }
 
   async function loadDatabases() {
@@ -319,28 +323,38 @@
       <h2 class="text-lg font-semibold">Retention Policies</h2>
       <p class="text-sm text-muted-foreground">Configure automatic data retention rules</p>
     </div>
-    <div class="flex items-center gap-2">
-      <Button variant="outline" size="sm" on:click={loadPolicies} disabled={isLoading}>
-        <RefreshCw class={cn('mr-2 h-4 w-4', isLoading && 'animate-spin')} />
-        Refresh
-      </Button>
-      <Button size="sm" on:click={openCreateDialog}>
-        <Plus class="mr-2 h-4 w-4" />
-        Create Policy
-      </Button>
-    </div>
+    {#if canManage}
+      <div class="flex items-center gap-2">
+        <Button variant="outline" size="sm" on:click={loadPolicies} disabled={isLoading}>
+          <RefreshCw class={cn('mr-2 h-4 w-4', isLoading && 'animate-spin')} />
+          Refresh
+        </Button>
+        <Button size="sm" on:click={openCreateDialog}>
+          <Plus class="mr-2 h-4 w-4" />
+          Create Policy
+        </Button>
+      </div>
+    {/if}
   </div>
 
   <!-- Content -->
   <div class="flex-1 overflow-auto p-6">
-    {#if !isLoading && !isFeatureDisabled && !error}
+    {#if canManage && !isLoading && !error}
       <SchedulerStatus {scheduler} formatTime={formatDate} />
     {/if}
-    {#if isLoading}
+    {#if !canManage}
+      <div class="flex flex-col items-center justify-center gap-4 rounded-lg border border-dashed py-12 text-center">
+        <Lock class="h-12 w-12 text-muted-foreground/30" />
+        <div>
+          <p class="text-lg font-medium">Retention policies require admin access</p>
+          <p class="text-sm text-muted-foreground">Ask an organization owner or admin to manage retention policies.</p>
+        </div>
+      </div>
+    {:else if isLoading}
       <div class="flex items-center justify-center py-12">
         <Loader2 class="h-8 w-8 animate-spin text-muted-foreground" />
       </div>
-    {:else if isFeatureDisabled}
+    {:else if error && capability?.state === 'disabled'}
       <div class="flex flex-col items-center justify-center gap-4 py-12 text-center">
         <Clock class="h-12 w-12 text-muted-foreground/30" />
         <div>
@@ -357,7 +371,7 @@ enabled = true</pre>
             Or set <code class="rounded bg-muted px-1 py-0.5 font-mono text-xs">ARC_RETENTION_ENABLED=true</code> in Arc's environment, which overrides arc.toml. Then restart the Arc server.
           </p>
         </div>
-        <Button variant="outline" on:click={loadPolicies}>
+        <Button variant="outline" on:click={checkAgain}>
           <RefreshCw class="mr-2 h-4 w-4" />
           Check Again
         </Button>
@@ -365,8 +379,8 @@ enabled = true</pre>
     {:else if error}
       <div class="flex flex-col items-center justify-center gap-4 py-12">
         <AlertCircle class="h-12 w-12 text-destructive" />
-        <p class="text-destructive">{error}</p>
-        <Button variant="outline" on:click={loadPolicies}>Try Again</Button>
+        <p class="text-destructive">{accessProblem(capability) ?? error}</p>
+        <Button variant="outline" on:click={checkAgain}>Try Again</Button>
       </div>
     {:else if policies.length === 0}
       <div class="flex flex-col items-center justify-center gap-4 py-12 text-center">

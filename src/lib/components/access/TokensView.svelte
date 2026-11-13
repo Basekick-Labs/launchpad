@@ -3,12 +3,16 @@
   import { goto } from '$app/navigation';
   import type { ArcClient } from '$lib/arcClient';
   import type { RbacSnapshot } from '$lib/rbac';
+  import type { CapabilityView } from '$lib/capabilities';
   import TokenManager from '$lib/components/TokenManager.svelte';
 
   export let client: ArcClient;
   export let arcVersion = '';
   export let orgId: string;
   export let instanceId: string;
+  export let currentRole = 'viewer';
+  /** Token management in Arc, from capability discovery (see TokenManager). */
+  export let capability: CapabilityView | null = null;
   /**
    * Show Arc access control: the instance is Enterprise with RBAC and the
    * viewer is an owner or admin. Otherwise this is the plain token list, as
@@ -92,11 +96,14 @@
             <TokenManager
               {client}
               {arcVersion}
+              {currentRole}
+              {capability}
               selectable
               selectedId={selectedTokenId}
               {teamsByToken}
               on:select={(e) => (selectedTokenId = e.detail.id)}
               on:changed={() => (reloadKey += 1)}
+              on:recheck
             />
           </div>
           <div class="min-h-0 p-4 xl:overflow-auto">
@@ -130,5 +137,5 @@
     {/await}
   </div>
 {:else}
-  <TokenManager {client} {arcVersion} />
+  <TokenManager {client} {arcVersion} {currentRole} {capability} on:recheck />
 {/if}
