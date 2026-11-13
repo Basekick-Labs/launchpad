@@ -161,10 +161,16 @@ export interface ClusterInfo {
 
 export interface ProbeResults {
   /**
-   * Whether a token is stored. Without one only /health is probed: an Arc with
-   * auth on would log every other probe as a failed authentication.
+   * Whether a token is stored. Without one only /health and the public
+   * /api/v1/auth/verify are probed, unless that shows Arc runs without auth:
+   * an Arc with auth on would log every other probe as a failed authentication.
    */
   hasToken: boolean;
+  /**
+   * No token is stored and Arc answered 404 to /api/v1/auth/verify: it runs
+   * without auth, so the other probes ran without a token.
+   */
+  arcAuthOff?: boolean;
   /** null when /health could not be read at all. */
   health: { license: LicenseSummary | null } | null;
   /** Permissions of the stored token from /api/v1/auth/verify; null = unknown. */
@@ -432,7 +438,7 @@ function classifyProbe(
 
 /** Why gated probes were skipped, when the token says they would fail. */
 function skippedReason(probes: ProbeResults, tokenIsAdmin: boolean | null): CapabilityReason | null {
-  if (!probes.hasToken) return 'no_token';
+  if (!probes.hasToken && !probes.arcAuthOff) return 'no_token';
   if (probes.tokenRejected) return 'token_rejected';
   if (tokenIsAdmin === false) return 'token_not_admin';
   return null;

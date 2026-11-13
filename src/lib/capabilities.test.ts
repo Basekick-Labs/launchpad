@@ -687,6 +687,20 @@ describe('console views (#100)', () => {
     }
   });
 
+  it('probes an Arc without auth when no token is stored', () => {
+    // runProbes sets arcAuthOff when the public verify route is a 404.
+    const view = caps({
+      hasToken: false,
+      arcAuthOff: true,
+      tokenPermissions: null,
+      probes: { ...probes().probes, rbac: notFound, tokens: notFound, retention: notFound },
+    });
+    expect(findCapability(view, 'tokens')).toMatchObject({ state: 'disabled', reason: 'arc_auth_off' });
+    expect(findCapability(view, 'retention')).toMatchObject({ state: 'disabled', reason: 'turned_off' });
+    expect(findCapability(view, 'continuous_queries')).toMatchObject({ state: 'available', reason: 'ok' });
+    expect(accessProblem(findCapability(view, 'tokens'))).toBeNull();
+  });
+
   it('reads a token-route 404 as Arc running without auth', () => {
     // Arc registers /api/v1/auth/* only when auth is on, verify included, so
     // the token's permissions are unknown and every probe is sent.

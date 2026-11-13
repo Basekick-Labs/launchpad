@@ -214,12 +214,39 @@ describe('discoverCapabilities', () => {
   });
 
 
-  it('probes only /health without a stored token', async () => {
+  it('probes only /health and the public verify route without a stored token', async () => {
+    routes['/api/v1/auth/verify'] = json(401, { valid: false, error: 'No token provided' });
     const caps = await discoverCapabilities(seedInstance(null), opts);
-    expect(requests.map((r) => r.path)).toEqual(['/health']);
-    expect(requests[0].auth).toBeUndefined();
+    expect(paths()).toEqual(['/api/v1/auth/verify', '/health']);
+    expect(requests.every((r) => r.auth === undefined)).toBe(true);
     expect(caps.license?.tier).toBe('enterprise');
     expect(caps.capabilities.rbac.reason).toBe('no_token');
+    expect(caps.capabilities.tokens.reason).toBe('no_token');
+  });
+
+  it('only a verify 404 counts as Arc running without auth', async () => {
+    for (const verify of [json(500, {}), json(200, { valid: false })]) {
+      resetCapabilityCacheForTests();
+      requests = [];
+      routes['/api/v1/auth/verify'] = verify;
+      const caps = await discoverCapabilities(seedInstance(null), opts);
+      expect(paths()).toEqual(['/api/v1/auth/verify', '/health']);
+      expect(caps.capabilities.tokens.reason).toBe('no_token');
+    }
+  });
+
+  it('probes an Arc without auth when no token is stored', async () => {
+    // Arc registers /api/v1/auth/* only when auth is on, verify included.
+    for (const p of ['/api/v1/auth/verify', '/api/v1/auth/tokens', '/api/v1/rbac/organizations']) {
+      routes[p] = json(404, { error: `Cannot GET ${p}` });
+    }
+    const caps = await discoverCapabilities(seedInstance(null), opts);
+    expect(requests.length).toBe(PROBE_COUNT);
+    expect(requests.every((r) => r.auth === undefined && r.method === 'GET')).toBe(true);
+    expect(caps.capabilities.tokens).toEqual({ state: 'disabled', reason: 'arc_auth_off' });
+    expect(caps.capabilities.rbac).toEqual({ state: 'disabled', reason: 'arc_auth_off' });
+    expect(caps.capabilities.retention).toEqual({ state: 'available', reason: 'ok' });
+    expect(caps.capabilities.continuous_queries).toEqual({ state: 'disabled', reason: 'turned_off' });
   });
 
   it('reports a non-admin token instead of probing admin routes with it', async () => {
