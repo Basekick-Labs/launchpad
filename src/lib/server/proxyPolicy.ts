@@ -104,6 +104,11 @@ const BLOCKED: ReadonlyArray<[RegExp, string]> = [
   // load-balanced proxy would land on one random node. The Access tab reads
   // and writes every node.
   [/^api\/v1\/governance(\/|$)/, 'Arc query limits are managed from the Access tab, which applies them to every node'],
+  // Active query management (#11): each node tracks only the queries it runs,
+  // so through the load-balanced proxy a list would be one random node's and
+  // a cancel would reach a node that does not know the query. The Queries tab
+  // reads every node and cancels on the query's own node.
+  [/^api\/v1\/queries(\/|$)/, 'Arc queries are managed from the Queries tab, which reads every node and cancels on the node that runs the query'],
 ];
 
 /** Why the proxy refuses this path for every role, or null. */

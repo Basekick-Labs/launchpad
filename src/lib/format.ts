@@ -26,6 +26,16 @@ export function formatUptime(seconds: number | null | undefined): string {
   return `${mins}m`;
 }
 
+/** A query's run time, to the precision that matters at its size: 850 → "850 ms", 1500 → "1.5 s", 125000 → "2m 5s". */
+export function formatDurationMs(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return DASH;
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
+  const s = Math.floor(ms / 1000);
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  return formatUptime(s);
+}
+
 /** Elapsed time for "last seen" style labels: 4200 → "4s ago". */
 export function formatAge(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms)) return DASH;

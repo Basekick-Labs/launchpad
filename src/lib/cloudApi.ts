@@ -3,6 +3,7 @@ import type { ClusterViewData, NodeLogsData, NodeSnapshotData } from '$lib/clust
 import type { ChangePage } from '$lib/changeLog';
 import type { RbacChange, RbacSnapshot } from '$lib/rbac';
 import type { GovernanceView, NodeUsage } from '$lib/governance';
+import type { CancelOutcome, QueriesView, QueryDetail } from '$lib/queryManagement';
 
 export interface User {
   id: string;
@@ -313,8 +314,8 @@ export class ClusterApiError extends Error {
   }
 }
 
-async function clusterFetch<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const res = await fetch(path, { signal });
+async function clusterFetch<T>(path: string, signal?: AbortSignal, method: 'GET' | 'DELETE' = 'GET'): Promise<T> {
+  const res = await fetch(path, { method, signal });
   if (res.ok) return res.json();
   const body = (await res.json().catch(() => null)) as { error?: string; message?: string } | null;
   // Cluster routes answer {error: code, message}; the shared auth preamble
@@ -404,4 +405,24 @@ export function getGovernance(orgId: string, id: string, signal?: AbortSignal): 
 
 export async function getTokenQueryUsage(orgId: string, id: string, tokenId: number, signal?: AbortSignal): Promise<NodeUsage[]> {
   return (await clusterFetch<{ nodes: NodeUsage[] }>(`${governancePath(orgId, id)}/${tokenId}/usage`, signal)).nodes;
+}
+
+// ---------------------------------------------------------------------------
+// Active query management (#11)
+
+const queriesPath = (orgId: string, id: string) => `/api/v1/orgs/${encodeURIComponent(orgId)}/instances/${encodeURIComponent(id)}/queries`;
+const queryPath = (orgId: string, id: string, nodeId: string, queryId: string) =>
+  `${queriesPath(orgId, id)}/${encodeURIComponent(nodeId)}/${encodeURIComponent(queryId)}`;
+
+export function getQueries(orgId: string, id: string, signal?: AbortSignal): Promise<QueriesView> {
+  return clusterFetch(queriesPath(orgId, id), signal);
+}
+
+export function getQueryDetail(orgId: string, id: string, nodeId: string, queryId: string, signal?: AbortSignal): Promise<QueryDetail> {
+  return clusterFetch(queryPath(orgId, id, nodeId, queryId), signal);
+}
+
+/** Cancel a running query on the node that runs it. Not abortable: once sent, the outcome is what matters. */
+export function cancelArcQuery(orgId: string, id: string, nodeId: string, queryId: string): Promise<CancelOutcome> {
+  return clusterFetch(queryPath(orgId, id, nodeId, queryId), undefined, 'DELETE');
 }

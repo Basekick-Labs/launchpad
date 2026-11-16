@@ -94,3 +94,15 @@ describe('blockedReason: query governance', () => {
     expect(blockedReason('api/v1/governancex')).toBeNull();
   });
 });
+
+describe('blockedReason: active query management', () => {
+  it('refuses the per-node query registry through the proxy, but not SQL', () => {
+    for (const path of ['api/v1/queries', 'api/v1/queries/active', 'api/v1/queries/history', 'api/v1/queries/3f2a9c1e-7b4']) {
+      expect(blockedReason(path)).toMatch(/Queries tab/);
+    }
+    expect(blockedReason(canonicalizePath('/api/v1//Queries/./active'))).not.toBeNull();
+    expect(blockedReason('api/v1/query')).toBeNull();
+    expect(blockedReason('api/v1/query/arrow')).toBeNull();
+    expect(blockedReason('api/v1/queriesx')).toBeNull();
+  });
+});
