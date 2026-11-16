@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatAge, formatBytes, formatCount, formatUptime } from './format';
+import { formatAge, formatBytes, formatCount, formatDurationMs, formatUptime } from './format';
 
 describe('formatBytes', () => {
   it('picks binary units', () => {
@@ -18,6 +18,15 @@ describe('formatUptime', () => {
   });
   it('falls back for invalid input', () => {
     expect(formatUptime(-5)).toBe('—');
+  });
+});
+
+describe('formatDurationMs', () => {
+  it('keeps the precision that matters at each size', () => {
+    expect([0, 850, 1500, 59_949, 125_000, 3_660_000].map(formatDurationMs)).toEqual(['0 ms', '850 ms', '1.5 s', '59.9 s', '2m 5s', '1h 1m']);
+  });
+  it('dashes values it cannot show', () => {
+    expect([null, undefined, NaN, -1].map(formatDurationMs)).toEqual(['—', '—', '—', '—']);
   });
 });
 

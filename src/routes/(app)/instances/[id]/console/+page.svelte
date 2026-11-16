@@ -19,7 +19,7 @@
   import { Button } from '$lib/components/ui/button';
   import {
     ArrowLeft, Terminal, Activity, FileText, Database,
-    Clock, BarChart3, Key, Bell, Radio, Network
+    Clock, BarChart3, Key, Bell, Radio, Network, Gauge
   } from 'lucide-svelte';
 
   export let data: any;
@@ -32,7 +32,7 @@
   let loading = true;
   let error = '';
 
-  type ViewId = 'console' | 'monitoring' | 'logs' | 'retention' | 'continuous-queries' | 'alerts' | 'mqtt' | 'tokens' | 'cluster';
+  type ViewId = 'console' | 'monitoring' | 'logs' | 'retention' | 'continuous-queries' | 'alerts' | 'mqtt' | 'tokens' | 'cluster' | 'queries';
   let activeView: ViewId = 'console';
   /**
    * The tab named in ?view=, kept in the URL so a reload or a shared link opens
@@ -90,6 +90,8 @@
     // Also shown when licensed but turned off, where it explains the
     // single-node state instead of disappearing.
     { id: 'cluster', label: 'Cluster', icon: Network, disabled: false, capability: 'cluster', showWhen: ['available', 'disabled'] },
+    // Also shown when licensed but turned off in Arc's config, where it says how to turn it on.
+    { id: 'queries', label: 'Queries', icon: Gauge, disabled: false, capability: 'query_management', showWhen: ['available', 'disabled'] },
   ];
 
   let capabilities: CapabilitiesView | null = null;
@@ -117,6 +119,7 @@
   $: retentionCapability = findCapability(capabilities, 'retention');
   $: cqCapability = findCapability(capabilities, 'continuous_queries');
   $: tokensCapability = findCapability(capabilities, 'tokens');
+  $: queriesCapability = findCapability(capabilities, 'query_management');
   $: visibleTabs = tabs
     .filter((t) => !t.capability || capabilityIn(capabilities, t.capability, t.showWhen ?? ['available']))
     .map((t) => (t.id === 'tokens' && (rbacServed || governanceServed) ? { ...t, label: 'Access' } : t));
@@ -240,6 +243,19 @@
         {#await import('$lib/components/cluster/ClusterView.svelte') then mod}
           {#key instanceId}
             <svelte:component this={mod.default} orgId={org.id} {instanceId} />
+          {/key}
+        {/await}
+      {:else if activeView === 'queries' && org}
+        <!-- Loaded on demand, like the Cluster view: only admins of licensed instances open it. -->
+        {#await import('$lib/components/queries/QueriesView.svelte') then mod}
+          {#key instanceId}
+            <svelte:component
+              this={mod.default}
+              orgId={org.id}
+              {instanceId}
+              capability={queriesCapability}
+              on:recheck={() => loadCapabilities(true)}
+            />
           {/key}
         {/await}
       {:else if activeView === 'tokens' && org}

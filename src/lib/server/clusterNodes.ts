@@ -169,6 +169,8 @@ async function logged<T>(key: string, fields: Record<string, unknown>, p: Promis
 }
 
 interface Get {
+  /** GET unless set; only pinnedDelete sends anything else. */
+  method?: 'GET' | 'DELETE';
   token?: string | null;
   signal: AbortSignal;
   maxBytes?: number;
@@ -180,7 +182,7 @@ async function get(url: string, opts: ClusterOptions, g: Get): Promise<{ status:
   const res = await safeRequest(url, {
     allowHttp: true,
     allowPrivate: opts.allowPrivate,
-    method: 'GET',
+    method: g.method ?? 'GET',
     headers: g.token ? { authorization: `Bearer ${g.token}` } : {},
     timeoutMs: IDLE_TIMEOUT_MS,
     signal: g.signal,
@@ -547,7 +549,7 @@ export interface NodeAnswer {
  * GET a path on one pinned node with the admin token. Transport failures
  * throw a ClusterError (unexpected ones are logged by toClusterError).
  */
-export async function pinnedGet(
+export function pinnedGet(
   target: { origin: string; ip: string },
   path: string,
   t: ClusterTarget,
@@ -555,7 +557,35 @@ export async function pinnedGet(
   signal: AbortSignal,
   maxBytes: number,
 ): Promise<NodeAnswer> {
-  const res = await wrap(get(`${target.origin}${path}`, opts, { token: t.admin_token, signal, maxBytes, pinTo: target.ip }));
+  return pinnedCall('GET', target, path, t, opts, signal, maxBytes);
+}
+
+/**
+ * DELETE a path on one pinned node with the admin token, for a change that
+ * belongs to that node alone (cancelling a query it runs). Sent once: the
+ * request goes to exactly that IP, and is not retried elsewhere.
+ */
+export function pinnedDelete(
+  target: { origin: string; ip: string },
+  path: string,
+  t: ClusterTarget,
+  opts: ClusterOptions,
+  signal: AbortSignal,
+  maxBytes: number,
+): Promise<NodeAnswer> {
+  return pinnedCall('DELETE', target, path, t, opts, signal, maxBytes);
+}
+
+async function pinnedCall(
+  method: 'GET' | 'DELETE',
+  target: { origin: string; ip: string },
+  path: string,
+  t: ClusterTarget,
+  opts: ClusterOptions,
+  signal: AbortSignal,
+  maxBytes: number,
+): Promise<NodeAnswer> {
+  const res = await wrap(get(`${target.origin}${path}`, opts, { method, token: t.admin_token, signal, maxBytes, pinTo: target.ip }));
   const body = parseJson(res.body);
   const err = typeof body === 'object' && body !== null ? (body as { error?: unknown }).error : undefined;
   return { status: res.status, body, message: typeof err === 'string' ? err.slice(0, 300) : null };
