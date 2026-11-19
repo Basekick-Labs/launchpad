@@ -12,6 +12,7 @@ const STATUS: Record<ClusterErrorCode, number> = {
   tls_error: 502,
   token_rejected: 502,
   token_not_admin: 502,
+  no_primary_writer: 503,
   upstream_status: 502,
   unreachable: 504,
   internal: 500,

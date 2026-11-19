@@ -104,6 +104,11 @@ const BLOCKED: ReadonlyArray<[RegExp, string]> = [
   // load-balanced proxy would land on one random node. The Access tab reads
   // and writes every node.
   [/^api\/v1\/governance(\/|$)/, 'Arc query limits are managed from the Access tab, which applies them to every node'],
+  // Backup and restore (#13): on a cluster only the primary writer runs them
+  // and holds their progress, so through the load-balanced proxy a backup
+  // would be refused on a random node and the status would read idle. The
+  // Backups tab sends each request to that node and records who sent it.
+  [/^api\/v1\/backup(\/|$)/, 'Arc backups are managed from the Backups tab, which sends them to the node that runs them'],
 ];
 
 /** Why the proxy refuses this path for every role, or null. */

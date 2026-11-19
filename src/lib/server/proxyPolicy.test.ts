@@ -94,3 +94,13 @@ describe('blockedReason: query governance', () => {
     expect(blockedReason('api/v1/governancex')).toBeNull();
   });
 });
+
+describe('blockedReason: backup and restore', () => {
+  it('refuses the backup routes through the proxy, with their own reason', () => {
+    for (const path of ['api/v1/backup', 'api/v1/backup/status', 'api/v1/backup/restore', 'api/v1/backup/backup-20261119-191548-072799a5']) {
+      expect(blockedReason(path)).toMatch(/Backups tab/);
+    }
+    expect(blockedReason(canonicalizePath('/api/v1//Backup/./restore'))).not.toBeNull();
+    expect(blockedReason('api/v1/backups')).toBeNull();
+  });
+});
