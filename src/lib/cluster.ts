@@ -398,6 +398,7 @@ export type ClusterErrorCode =
   | 'tls_error'
   | 'token_rejected'
   | 'token_not_admin'
+  | 'no_primary_writer'
   | 'upstream_status'
   | 'internal';
 
@@ -450,6 +451,7 @@ const ERROR_TEXT: Record<ClusterErrorCode | 'forbidden' | 'error', string> = {
   token_not_admin: 'This needs an admin token',
   standalone: 'Clustering is not enabled on this instance',
   not_found: 'This node is no longer in the cluster',
+  no_primary_writer: 'Arc does not report which writer is the primary right now',
   upstream_status: 'Arc returned an unexpected response',
   internal: 'Launchpad hit an internal error',
   forbidden: 'You need to be an owner or admin of this organization',

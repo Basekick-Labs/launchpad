@@ -3,6 +3,7 @@ import type { ClusterViewData, NodeLogsData, NodeSnapshotData } from '$lib/clust
 import type { ChangePage } from '$lib/changeLog';
 import type { RbacChange, RbacSnapshot } from '$lib/rbac';
 import type { GovernanceView, NodeUsage } from '$lib/governance';
+import type { ActionOutcome, BackupDetailView, BackupsView, CreateBackupInput, ProgressView, RestoreInput } from '$lib/backup';
 
 export interface User {
   id: string;
@@ -313,8 +314,8 @@ export class ClusterApiError extends Error {
   }
 }
 
-async function clusterFetch<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const res = await fetch(path, { signal });
+async function clusterFetch<T>(path: string, signal?: AbortSignal, init?: RequestInit): Promise<T> {
+  const res = init ? await apiFetch(path, { ...init, signal }) : await fetch(path, { signal });
   if (res.ok) return res.json();
   const body = (await res.json().catch(() => null)) as { error?: string; message?: string } | null;
   // Cluster routes answer {error: code, message}; the shared auth preamble
@@ -404,4 +405,33 @@ export function getGovernance(orgId: string, id: string, signal?: AbortSignal): 
 
 export async function getTokenQueryUsage(orgId: string, id: string, tokenId: number, signal?: AbortSignal): Promise<NodeUsage[]> {
   return (await clusterFetch<{ nodes: NodeUsage[] }>(`${governancePath(orgId, id)}/${tokenId}/usage`, signal)).nodes;
+}
+
+// ---------------------------------------------------------------------------
+// Backup and restore (#13)
+
+const backupsPath = (orgId: string, id: string) => `/api/v1/orgs/${encodeURIComponent(orgId)}/instances/${encodeURIComponent(id)}/backups`;
+
+export function getBackups(orgId: string, id: string, signal?: AbortSignal): Promise<BackupsView> {
+  return clusterFetch(backupsPath(orgId, id), signal);
+}
+
+export function getBackupProgress(orgId: string, id: string, signal?: AbortSignal): Promise<ProgressView> {
+  return clusterFetch(`${backupsPath(orgId, id)}/status`, signal);
+}
+
+export function getBackupDetail(orgId: string, id: string, backupId: string, signal?: AbortSignal): Promise<BackupDetailView> {
+  return clusterFetch(`${backupsPath(orgId, id)}/${encodeURIComponent(backupId)}`, signal);
+}
+
+export function createBackup(orgId: string, id: string, input: CreateBackupInput): Promise<ActionOutcome> {
+  return clusterFetch(backupsPath(orgId, id), undefined, { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function deleteBackup(orgId: string, id: string, backupId: string): Promise<ActionOutcome> {
+  return clusterFetch(`${backupsPath(orgId, id)}/${encodeURIComponent(backupId)}`, undefined, { method: 'DELETE' });
+}
+
+export function restoreBackup(orgId: string, id: string, backupId: string, input: RestoreInput): Promise<ActionOutcome> {
+  return clusterFetch(`${backupsPath(orgId, id)}/${encodeURIComponent(backupId)}/restore`, undefined, { method: 'POST', body: JSON.stringify(input) });
 }

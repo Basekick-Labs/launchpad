@@ -169,6 +169,12 @@ async function logged<T>(key: string, fields: Record<string, unknown>, p: Promis
 }
 
 interface Get {
+  /** GET unless set; only pinnedSend sends anything else. */
+  method?: 'GET' | 'POST' | 'DELETE';
+  /** JSON request body, for pinnedSend. */
+  json?: string;
+  /** Idle timeout, for routes Arc answers slowly; IDLE_TIMEOUT_MS unless set. */
+  idleMs?: number;
   token?: string | null;
   signal: AbortSignal;
   maxBytes?: number;
@@ -180,9 +186,13 @@ async function get(url: string, opts: ClusterOptions, g: Get): Promise<{ status:
   const res = await safeRequest(url, {
     allowHttp: true,
     allowPrivate: opts.allowPrivate,
-    method: 'GET',
-    headers: g.token ? { authorization: `Bearer ${g.token}` } : {},
-    timeoutMs: IDLE_TIMEOUT_MS,
+    method: g.method ?? 'GET',
+    headers: {
+      ...(g.token ? { authorization: `Bearer ${g.token}` } : {}),
+      ...(g.json !== undefined ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(g.json) } : {}),
+    },
+    body: g.json,
+    timeoutMs: g.idleMs ?? IDLE_TIMEOUT_MS,
     signal: g.signal,
     maxResponseBytes: g.maxBytes,
     truncateResponseAt: g.truncate,
@@ -510,17 +520,7 @@ export interface PinnedNode {
  */
 export async function pinnedNodes(t: ClusterTarget, opts: ClusterOptions): Promise<PinnedNode[]> {
   const topo = await getTopology(t, opts);
-  if (!topo.status.enabled) {
-    const base = endpointBase(t);
-    let display: string;
-    try {
-      display = new URL(base).host;
-    } catch {
-      throw new ClusterError('bad_address', 'The endpoint URL is not valid');
-    }
-    const ip = await endpointIp(t, opts);
-    return [{ nodeId: 'standalone', servesQueries: true, target: { origin: base, ip, display }, error: null }];
-  }
+  if (!topo.status.enabled) return [{ nodeId: 'standalone', servesQueries: true, target: await endpointTarget(t, opts), error: null }];
   const status = topo.status;
   const signal = AbortSignal.timeout(NODE_DEADLINE_MS);
   return Promise.all(status.nodes.map(async (node): Promise<PinnedNode> => {
@@ -535,6 +535,53 @@ export async function pinnedNodes(t: ClusterTarget, opts: ClusterOptions): Promi
   }));
 }
 
+/** A standalone instance's one node: the endpoint itself (nothing to verify it against). */
+async function endpointTarget(t: ClusterTarget, opts: ClusterOptions): Promise<NonNullable<PinnedNode['target']>> {
+  const base = endpointBase(t);
+  let display: string;
+  try {
+    display = new URL(base).host;
+  } catch {
+    throw new ClusterError('bad_address', 'The endpoint URL is not valid');
+  }
+  return { origin: base, ip: await endpointIp(t, opts), display };
+}
+
+export interface WriterNode {
+  nodeId: string;
+  clustered: boolean;
+  target: NonNullable<PinnedNode['target']>;
+}
+
+/**
+ * The node Arc runs writer-only operations on (backup and restore, #13): the
+ * endpoint of a standalone instance, or in a cluster the primary writer Arc
+ * reports (`primary_writer_id`, Arc main) or else its only writer (v26.09.x,
+ * which has no primary). Resolved and identity-checked like any other node,
+ * and never swapped for the load-balanced endpoint, where the request could
+ * reach a node that does not run the operation.
+ */
+export async function pinnedPrimaryWriter(t: ClusterTarget, opts: ClusterOptions): Promise<WriterNode> {
+  const topo = await getTopology(t, opts);
+  if (!topo.status.enabled) return { nodeId: 'standalone', clustered: false, target: await endpointTarget(t, opts) };
+  const status = topo.status;
+  const writers = status.nodes.filter((n) => n.role === 'writer');
+  const node = status.primaryWriterId
+    ? status.nodes.find((n) => n.id === status.primaryWriterId)
+    : writers.length === 1 ? writers[0] : undefined;
+  if (!node) {
+    throw new ClusterError(
+      'no_primary_writer',
+      status.primaryWriterId || writers.length === 0
+        ? 'Arc reports no primary writer for this cluster right now'
+        : 'Arc does not say which of its writers is the primary',
+    );
+  }
+  const r = await wrap(resolveNode(t, node, opts, AbortSignal.timeout(NODE_DEADLINE_MS)));
+  await verifyIdentity(t, status, r, opts);
+  return { nodeId: node.id, clustered: true, target: { origin: r.origin, ip: r.ip, display: r.display } };
+}
+
 export interface NodeAnswer {
   status: number;
   /** Parsed JSON, or null when the body is not JSON. */
@@ -547,15 +594,40 @@ export interface NodeAnswer {
  * GET a path on one pinned node with the admin token. Transport failures
  * throw a ClusterError (unexpected ones are logged by toClusterError).
  */
-export async function pinnedGet(
+export function pinnedGet(
   target: { origin: string; ip: string },
   path: string,
   t: ClusterTarget,
   opts: ClusterOptions,
   signal: AbortSignal,
   maxBytes: number,
+  idleMs?: number,
 ): Promise<NodeAnswer> {
-  const res = await wrap(get(`${target.origin}${path}`, opts, { token: t.admin_token, signal, maxBytes, pinTo: target.ip }));
+  return pinnedCall(target, path, opts, { token: t.admin_token, signal, maxBytes, pinTo: target.ip, idleMs });
+}
+
+/**
+ * POST (with a JSON body) or DELETE a path on one pinned node with the admin
+ * token, for a change that belongs to that node. Sent once, to exactly that
+ * IP: never retried, and never sent anywhere else.
+ */
+export function pinnedSend(
+  method: 'POST' | 'DELETE',
+  target: { origin: string; ip: string },
+  path: string,
+  body: unknown,
+  t: ClusterTarget,
+  opts: ClusterOptions,
+  signal: AbortSignal,
+  maxBytes: number,
+  idleMs?: number,
+): Promise<NodeAnswer> {
+  const json = body === undefined ? undefined : JSON.stringify(body);
+  return pinnedCall(target, path, opts, { method, json, token: t.admin_token, signal, maxBytes, pinTo: target.ip, idleMs });
+}
+
+async function pinnedCall(target: { origin: string }, path: string, opts: ClusterOptions, g: Get): Promise<NodeAnswer> {
+  const res = await wrap(get(`${target.origin}${path}`, opts, g));
   const body = parseJson(res.body);
   const err = typeof body === 'object' && body !== null ? (body as { error?: unknown }).error : undefined;
   return { status: res.status, body, message: typeof err === 'string' ? err.slice(0, 300) : null };
